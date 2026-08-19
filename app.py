@@ -48,7 +48,7 @@ st.markdown("""
 
     /* Enterprise Job Header */
     .job-header-card {
-        background: #141414;
+        background: #FFFFFF;
         border: 1px solid #DCD6C8;
         border-top: 4px solid #C44536;
         border-radius: 6px;
@@ -86,7 +86,7 @@ st.markdown("""
 
     /* Structural KPI Metric Badges */
     .metric-panel {
-        background: #FFFFFF;
+        background: #141414;
         border: 1px solid #DCD6C8;
         border-radius: 6px;
         padding: 14px 18px;
