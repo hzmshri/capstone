@@ -8,7 +8,7 @@ from weld_analyzer import WeldDefectDetector
 
 # Page Setup
 st.set_page_config(
-    page_title="WeldQC Enterprise | Structural Field Inspection",
+    page_title="Welding Detector | Structural Field Inspection",
     page_icon="🏗️",
     layout="wide",
     initial_sidebar_state="expanded"
