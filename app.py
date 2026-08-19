@@ -10,10 +10,13 @@ st.title("Weld Defect Detection & Structural QA/QC System")
 st.markdown("Automated vision inspection for steel joint compliance (AWS D1.1 / EN ISO 5817).")
 
 # Sidebar Configuration
-st.sidebar.header("Inspection Parameters")
+st.sidebar.header("Inspection Configuration")
+joint_mode = st.sidebar.selectbox(
+    "Joint Geometry Profile",
+    ["Auto-Detect", "Linear Plate / Fillet Joint", "Circumferential Pipe / Circular Joint"]
+)
 confidence_thresh = st.sidebar.slider("AI Confidence Threshold", 0.1, 1.0, 0.45, 0.05)
-workmanship_sens = st.sidebar.slider("Defect Sensitivity (Tolerances)", 0.5, 2.0, 1.0, 0.1, 
-                                     help="Lower this (e.g. 0.7 - 0.9) if good welds are falsely flagged.")
+workmanship_sens = st.sidebar.slider("Defect Sensitivity (Tolerances)", 0.5, 2.0, 1.0, 0.1)
 mm_per_pixel = st.sidebar.number_input("Optical Scale Calibration (mm/px)", value=0.050, format="%.4f")
 
 detector = WeldDefectDetector()
@@ -24,7 +27,7 @@ if uploaded_file is not None:
     raw_img = Image.open(uploaded_file).convert("RGB")
     raw_np = np.array(raw_img)
 
-    with st.spinner("Analyzing weld geometry, spatter density, and structural integrity..."):
+    with st.spinner("Analyzing joint geometry and workmanship standards..."):
         annotated_np, findings, overall_verdict = detector.inspect(
             raw_np, 
             mm_per_pixel=mm_per_pixel, 
@@ -32,7 +35,6 @@ if uploaded_file is not None:
             sensitivity=workmanship_sens
         )
 
-    # Side-by-side display
     col1, col2 = st.columns(2)
     with col1:
         st.subheader("Raw Field Capture")
@@ -51,8 +53,6 @@ if uploaded_file is not None:
     if findings:
         st.subheader("Detected Non-Conformities")
         df = pd.DataFrame(findings)
-        if "BBox" in df.columns:
-            df = df.drop(columns=["BBox"])
         st.dataframe(df, use_container_width=True)
     else:
-        st.info("No surface defects or severe workmanship issues detected within current threshold parameters.")
+        st.info("No structural defects or severe workmanship issues detected within current tolerance limits.")
