@@ -11,9 +11,10 @@ st.markdown("Automated vision inspection for steel joint compliance (AWS D1.1 / 
 
 # Sidebar Configuration
 st.sidebar.header("Inspection Parameters")
-confidence_thresh = st.sidebar.slider("Confidence Threshold", 0.1, 1.0, 0.4, 0.05)
+confidence_thresh = st.sidebar.slider("AI Confidence Threshold", 0.1, 1.0, 0.45, 0.05)
+workmanship_sens = st.sidebar.slider("Defect Sensitivity (Tolerances)", 0.5, 2.0, 1.0, 0.1, 
+                                     help="Lower this (e.g. 0.7 - 0.9) if good welds are falsely flagged.")
 mm_per_pixel = st.sidebar.number_input("Optical Scale Calibration (mm/px)", value=0.050, format="%.4f")
-max_tolerable_len = st.sidebar.number_input("Max Tolerable Minor Flaw (mm)", value=2.0, step=0.5)
 
 detector = WeldDefectDetector()
 
@@ -23,28 +24,30 @@ if uploaded_file is not None:
     raw_img = Image.open(uploaded_file).convert("RGB")
     raw_np = np.array(raw_img)
 
-    with st.spinner("Running deep defect and workmanship analysis..."):
+    with st.spinner("Analyzing weld geometry, spatter density, and structural integrity..."):
         annotated_np, findings, overall_verdict = detector.inspect(
-            raw_np, mm_per_pixel=mm_per_pixel, conf_thresh=confidence_thresh
+            raw_np, 
+            mm_per_pixel=mm_per_pixel, 
+            conf_thresh=confidence_thresh,
+            sensitivity=workmanship_sens
         )
 
-    # Display side-by-side images
+    # Side-by-side display
     col1, col2 = st.columns(2)
     with col1:
-        st.subheader("Raw Capture")
+        st.subheader("Raw Field Capture")
         st.image(raw_img, use_container_width=True)
 
     with col2:
-        st.subheader("Annotated Analysis")
+        st.subheader("QA/QC Annotated Seam")
         st.image(annotated_np, use_container_width=True)
 
     st.divider()
     if overall_verdict == "PASS":
-        st.success("### Overall Joint Verdict: PASS (Ready for Final QC Sign-off)")
+        st.success("### Overall Joint Verdict: PASS (Structural Quality Meets Tolerance)")
     else:
-        st.error("### Overall Joint Verdict: FAIL (Rework / Rectification Required)")
+        st.error("### Overall Joint Verdict: FAIL (Non-Conformities Detected - Rework Required)")
 
-    # Display findings safely
     if findings:
         st.subheader("Detected Non-Conformities")
         df = pd.DataFrame(findings)
@@ -52,4 +55,4 @@ if uploaded_file is not None:
             df = df.drop(columns=["BBox"])
         st.dataframe(df, use_container_width=True)
     else:
-        st.info("No surface defects or workmanship issues detected within current threshold parameters.")
+        st.info("No surface defects or severe workmanship issues detected within current threshold parameters.")
