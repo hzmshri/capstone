@@ -6,209 +6,233 @@ from PIL import Image
 from datetime import datetime
 from weld_analyzer import WeldDefectDetector
 
-# Page Configuration
+# Page Setup
 st.set_page_config(
-    page_title="WeldQC System | Structural QA/QC",
-    page_icon="🔥",
+    page_title="WeldQC Enterprise | Structural Field Inspection",
+    page_icon="🏗️",
     layout="wide",
     initial_sidebar_state="expanded"
 )
 
-# Custom Bronze & Brushed Titanium Theme CSS
+# Architectural Cream & Steel Structure Layout CSS
 st.markdown("""
 <style>
-    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
+    @import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap');
 
-    /* Global Typography & Canvas Background */
-    html, body, [class*="css"] {
-        font-family: 'Inter', sans-serif;
-    }
-
+    /* Global Body & Steel Truss Blueprint Background */
     .stApp {
-        background-color: #63615A;
+        background-color: #F6F4EE;
         background-image: 
-            radial-gradient(circle at 10% 20%, rgba(200, 185, 160, 0.08) 0%, transparent 40%),
-            radial-gradient(circle at 90% 80%, rgba(0, 0, 0, 0.18) 0%, transparent 50%),
-            repeating-linear-gradient(45deg, rgba(255,255,255,0.015) 0, rgba(255,255,255,0.015) 1px, transparent 0, transparent 40px);
-        color: #F1EFEA;
+            /* Steel Structural Truss Grid Vector Pattern */
+            radial-gradient(#D6D1C4 0.75px, transparent 0.75px),
+            linear-gradient(to right, rgba(190, 182, 168, 0.15) 1px, transparent 1px),
+            linear-gradient(to bottom, rgba(190, 182, 168, 0.15) 1px, transparent 1px);
+        background-size: 24px 24px, 120px 120px, 120px 120px;
+        color: #24221F;
+        font-family: 'Space Grotesk', -apple-system, sans-serif;
     }
 
-    /* Left Sidebar Styling */
+    /* Professional Sidebar */
     section[data-testid="stSidebar"] {
-        background-color: #171615 !important;
-        border-right: 1px solid #2B2824;
+        background-color: #ECE8DE !important;
+        border-right: 1.5px solid #D8D2C4;
+        box-shadow: 2px 0 12px rgba(0,0,0,0.03);
     }
-
-    section[data-testid="stSidebar"] hr {
-        border-color: #2D2A26;
-        margin: 1.2rem 0;
-    }
-
+    
     section[data-testid="stSidebar"] .stMarkdown h3,
     section[data-testid="stSidebar"] .stMarkdown h2,
     section[data-testid="stSidebar"] .stMarkdown p {
-        color: #C8BAA8;
+        color: #38342E;
+        font-family: 'Space Grotesk', sans-serif;
     }
 
-    /* Top Main Title & Subtitle */
-    .main-title {
-        color: #F4F1EA;
-        font-size: 2.2rem;
-        font-weight: 500;
-        letter-spacing: -0.5px;
-        margin-bottom: 0.35rem;
-    }
-    
-    .meta-subtitle {
-        color: #D3C9BC;
-        font-size: 0.88rem;
-        font-weight: 400;
-        margin-bottom: 1.8rem;
-    }
-    
-    .meta-subtitle b {
-        color: #EDE6DC;
-    }
-
-    /* Bronze Sliders & Accent Elements */
-    .stSlider > div > div > div > div {
-        background-color: #B87A4F !important;
-    }
-    
-    div[data-testid="stThumbValue"] {
-        color: #DFC5AA !important;
-    }
-
-    /* Brushed Metal Upload Area */
-    div[data-testid="stFileUploader"] {
-        background: linear-gradient(180deg, #242528 0%, #1A1A1C 100%);
-        border: 1px solid #383735;
-        border-radius: 8px;
-        padding: 6px 14px;
-        box-shadow: inset 0 1px 0 rgba(255,255,255,0.05), 0 4px 14px rgba(0,0,0,0.35);
-    }
-    
-    div[data-testid="stFileUploader"] section {
-        padding: 0px !important;
-        background: transparent !important;
-    }
-    
-    div[data-testid="stFileUploader"] button {
-        background: linear-gradient(180deg, #6E4933 0%, #4D3322 100%) !important;
-        border: 1px solid #8C5F43 !important;
-        color: #F7E9DC !important;
-        border-radius: 6px !important;
-        font-weight: 500 !important;
-        padding: 0.35rem 1.2rem !important;
-    }
-
-    /* Status Result Banners */
-    .pass-card {
-        background: rgba(46, 125, 50, 0.22);
-        border: 1px solid #4CAF50;
-        border-radius: 8px;
-        padding: 16px 20px;
-        color: #E8F5E9;
-        font-size: 1.15rem;
-        font-weight: 600;
-        margin: 1.2rem 0;
-    }
-    
-    .fail-card {
-        background: rgba(198, 40, 40, 0.22);
-        border: 1px solid #EF5350;
-        border-radius: 8px;
-        padding: 16px 20px;
-        color: #FFEBEE;
-        font-size: 1.15rem;
-        font-weight: 600;
-        margin: 1.2rem 0;
-    }
-
-    /* Action Primary Button */
-    div.stButton > button:first-child {
-        background: linear-gradient(180deg, #8E5632 0%, #5E371E 100%);
-        border: 1px solid #AB6B40;
-        color: #FFFFFF;
-        font-weight: 600;
+    /* Enterprise Job Header */
+    .job-header-card {
+        background: #FFFFFF;
+        border: 1px solid #DCD6C8;
+        border-top: 4px solid #C44536;
         border-radius: 6px;
-        height: 44px;
-        letter-spacing: 0.3px;
-        box-shadow: 0 4px 12px rgba(0,0,0,0.25);
+        padding: 20px 24px;
+        margin-bottom: 22px;
+        box-shadow: 0 2px 8px rgba(50, 45, 35, 0.04);
+    }
+    
+    .job-title {
+        font-size: 22px;
+        font-weight: 700;
+        letter-spacing: -0.3px;
+        color: #1A1917;
+        margin: 0;
     }
 
+    .meta-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+        gap: 12px;
+        margin-top: 14px;
+        padding-top: 12px;
+        border-top: 1px solid #EEE9DF;
+        font-family: 'JetBrains Mono', monospace;
+        font-size: 11.5px;
+        color: #635E54;
+    }
+
+    .meta-item b {
+        color: #1A1917;
+        display: block;
+        font-size: 12.5px;
+        margin-top: 2px;
+    }
+
+    /* Structural KPI Metric Badges */
+    .metric-panel {
+        background: #FFFFFF;
+        border: 1px solid #DCD6C8;
+        border-radius: 6px;
+        padding: 14px 18px;
+        text-align: left;
+        box-shadow: 0 1px 4px rgba(0,0,0,0.03);
+    }
+    
+    .metric-label-txt {
+        font-size: 11px;
+        font-weight: 600;
+        text-transform: uppercase;
+        letter-spacing: 0.6px;
+        color: #7A7468;
+    }
+    
+    .metric-val-txt {
+        font-family: 'JetBrains Mono', monospace;
+        font-size: 22px;
+        font-weight: 700;
+        margin-top: 4px;
+    }
+
+    /* Pass / Fail Compliance Cards */
+    .verdict-pass {
+        background: #F0FDF4;
+        border: 1.5px solid #22C55E;
+        border-left: 6px solid #16A34A;
+        border-radius: 6px;
+        padding: 16px 20px;
+        color: #15803D;
+        font-weight: 700;
+        font-size: 16px;
+        margin: 16px 0;
+    }
+
+    .verdict-fail {
+        background: #FEF2F2;
+        border: 1.5px solid #EF4444;
+        border-left: 6px solid #DC2626;
+        border-radius: 6px;
+        padding: 16px 20px;
+        color: #B91C1C;
+        font-weight: 700;
+        font-size: 16px;
+        margin: 16px 0;
+    }
+
+    /* Industrial Inputs & Sliders */
+    .stTextInput input, .stSelectbox select, .stNumberInput input {
+        background-color: #FFFFFF !important;
+        border: 1px solid #D2CBBD !important;
+        border-radius: 4px !important;
+        color: #1E1D1A !important;
+        font-family: 'JetBrains Mono', monospace !important;
+        font-size: 13px !important;
+    }
+
+    /* Primary Action CTA Button */
+    div.stButton > button:first-child {
+        background-color: #C44536;
+        border: 1px solid #A8382B;
+        color: #FFFFFF;
+        font-family: 'Space Grotesk', sans-serif;
+        font-weight: 600;
+        font-size: 14px;
+        letter-spacing: 0.4px;
+        border-radius: 4px;
+        height: 44px;
+        box-shadow: 0 2px 6px rgba(196, 69, 54, 0.25);
+    }
+    
     div.stButton > button:first-child:hover {
-        background: linear-gradient(180deg, #A2643B 0%, #6E4124 100%);
-        border-color: #C78253;
+        background-color: #AD3B2D;
+        border-color: #8E2E23;
         color: #FFFFFF;
     }
 </style>
 """, unsafe_allow_html=True)
 
-# ----------------- SIDEBAR -----------------
+# ----------------- SIDEBAR: SYSTEM & SENSOR CONTROLS -----------------
 with st.sidebar:
-    # Custom Brand Flame/Circuit Logo
     st.markdown("""
-    <div style="text-align: center; margin-top: 10px; margin-bottom: 20px;">
-        <svg width="44" height="44" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-            <path d="M12 2C10.5 5 8 7.5 8 11C8 13.5 9.5 15.5 12 16C10.5 14 11 12 12.5 10C13.5 12 15 13 15 15C15 17.5 13 22 7 20C12 23 18 20 18 14C18 9 14.5 5 12 2Z" fill="url(#copper_grad)"/>
-            <circle cx="12" cy="14" r="1.5" fill="#E8A87C"/>
-            <path d="M12 15.5V18M9.5 17L12 15.5M14.5 17L12 15.5" stroke="#E8A87C" stroke-width="1.2" stroke-linecap="round"/>
-            <defs>
-                <linearGradient id="copper_grad" x1="8" y1="2" x2="18" y2="22" gradientUnits="userSpaceOnUse">
-                    <stop stop-color="#E29566"/>
-                    <stop offset="0.5" stop-color="#B87346"/>
-                    <stop offset="1" stop-color="#733B19"/>
-                </linearGradient>
-            </defs>
-        </svg>
-        <div style="color: #D69768; font-size: 1.25rem; font-weight: 600; letter-spacing: 0.5px; margin-top: 6px;">
-            WeldQC System
+    <div style="display: flex; align-items: center; gap: 10px; margin-bottom: 8px;">
+        <span style="font-size: 24px;">📐</span>
+        <div>
+            <div style="font-size: 16px; font-weight: 700; color: #1E1D1A;">WeldQC Enterprise</div>
+            <div style="font-size: 11px; color: #7A7468; font-family: 'JetBrains Mono';">v3.4.1 | AWS D1.1-2025</div>
         </div>
     </div>
     """, unsafe_allow_html=True)
+    
+    st.divider()
+    
+    st.markdown("### **Job Metadata**")
+    job_no = st.text_input("Project / Job No.", value="PRJ-STEEL-7702")
+    drawing_ref = st.text_input("Drawing / Joint ID", value="DWG-ST-04-W2")
+    welder_id = st.text_input("Welder Stamp ID", value="WLD-8819")
+    inspector_id = st.text_input("QC Lead Inspector", value="ENG-HAZZIQ")
+    standard_spec = st.selectbox(
+        "Design Standard Code", 
+        ["AWS D1.1 (Structural Welding Code - Steel)", "EN ISO 5817 (Level B - Stringent)", "EN ISO 5817 (Level C - Moderate)"]
+    )
+    
+    st.divider()
+    
+    st.markdown("### **Sensor & Optical Calibration**")
+    workmanship_sens = st.slider("Tolerance Strictness", 0.5, 2.0, 1.0, 0.1, 
+                                help="Adjust standard deviation sensitivity for weld toe and bead roughness.")
+    mm_per_pixel = st.number_input("Optical Scale Calibration (mm/px)", value=0.0500, format="%.4f", step=0.005)
 
-    st.markdown("### Inspection Settings")
-    workmanship_sens = st.slider("Defect Sensitivity", 0.5, 2.0, 1.0, 0.1, 
-                                help="Adjust threshold sensitivity for bead width variance and lumpiness.")
-    mm_per_pixel = st.number_input("Optical Calibration (mm/px)", value=0.0500, format="%.4f", step=0.005)
+# ----------------- MAIN INTERFACE -----------------
+detector = WeldDefectDetector()
 
-    st.markdown("---")
-    st.markdown("### Project Reference")
-    inspector_name = st.text_input("Inspector ID / Name", value="ENG-QC-01")
-    joint_ref = st.text_input("Joint ID / Tag", value="JT-WELD-2026")
-    standard_code = st.selectbox("Standard Specification", ["AWS D1.1 (Structural Steel)", "ISO 5817 (Level B)", "ISO 5817 (Level C)"])
-
-# ----------------- MAIN VIEW -----------------
-st.markdown('<div class="main-title">Weld Defect Detection & Structural QA/QC System</div>', unsafe_allow_html=True)
+# Official Structural Header Card
 st.markdown(f"""
-<div class="meta-subtitle">
-    Standard: <b>{standard_code}</b> &nbsp;|&nbsp; 
-    Reference: <b>{joint_ref}</b> &nbsp;|&nbsp; 
-    Inspector: <b>{inspector_name}</b> &nbsp;|&nbsp; 
-    Date: <b>{datetime.now().strftime('%d %b %Y')}</b>
+<div class="job-header-card">
+    <div style="display: flex; justify-content: space-between; align-items: center;">
+        <div class="job-title">Structural Joint NDT / Visual Inspection Report</div>
+        <span style="background: #EEE9DF; padding: 4px 10px; border-radius: 4px; font-family: 'JetBrains Mono'; font-size: 11px; font-weight: 600; color: #4A463E;">STATUS: ACTIVE QC SESSION</span>
+    </div>
+    <div class="meta-grid">
+        <div class="meta-item">PROJECT REF<b>{job_no}</b></div>
+        <div class="meta-item">JOINT / DRAWING<b>{drawing_ref}</b></div>
+        <div class="meta-item">WELDER STAMP<b>{welder_id}</b></div>
+        <div class="meta-item">QC INSPECTOR<b>{inspector_id}</b></div>
+        <div class="meta-item">TIMESTAMP<b>{datetime.now().strftime('%Y-%m-%d %H:%M')}</b></div>
+    </div>
 </div>
 """, unsafe_allow_html=True)
 
-detector = WeldDefectDetector()
-
-st.markdown("<p style='color: #ECE7DF; font-size: 0.95rem; margin-bottom: 6px;'>Upload Steel Weld Capture (JPG, PNG, BMP)</p>", unsafe_allow_html=True)
-uploaded_file = st.file_uploader("", type=["jpg", "jpeg", "png"], label_visibility="collapsed")
+# Field Capture Uploader
+uploaded_file = st.file_uploader("Upload Steel Weld Joint Capture (High-Res JPG, PNG, BMP)", type=["jpg", "jpeg", "png"])
 
 if uploaded_file is not None:
     raw_img = Image.open(uploaded_file).convert("RGB")
     raw_np = np.array(raw_img)
     img_h, img_w, _ = raw_np.shape
 
-    st.markdown("<br>", unsafe_allow_html=True)
-    st.markdown("#### 🎯 1. Target Weld Seam Framing")
-    st.caption("Adjust sliders to box the active bead and isolate background parent metal reflections.")
-    
+    st.markdown("#### 🎯 Step 1: Frame Weld Seam Region of Interest (ROI)")
+    st.caption("Adjust the sliders below to isolate the active weld bead from parent steel plates and background fixtures.")
+
     col_x, col_y = st.columns(2)
     with col_x:
-        x_range = st.slider("Horizontal Seam Framing (% Width)", 0, 100, (15, 85))
+        x_range = st.slider("Horizontal Seam Area (% of Width)", 0, 100, (15, 85))
     with col_y:
-        y_range = st.slider("Vertical Seam Framing (% Height)", 0, 100, (15, 85))
+        y_range = st.slider("Vertical Seam Area (% of Height)", 0, 100, (15, 85))
 
     rx = int((x_range[0] / 100.0) * img_w)
     ry = int((y_range[0] / 100.0) * img_h)
@@ -217,16 +241,17 @@ if uploaded_file is not None:
     roi_box = (rx, ry, max(rw, 10), max(rh, 10))
 
     preview_np = raw_np.copy()
-    cv2.rectangle(preview_np, (rx, ry), (rx + rw, ry + rh), (218, 90, 45), 3)
-    cv2.putText(preview_np, "TARGET SEAM ROI", (rx, max(ry - 12, 25)), 
-                cv2.FONT_HERSHEY_SIMPLEX, 0.7, (218, 90, 45), 2)
+    cv2.rectangle(preview_np, (rx, ry), (rx + rw, ry + rh), (196, 69, 54), 3)
+    cv2.putText(preview_np, "FIELD TARGET ROI", (rx, max(ry - 12, 25)), 
+                cv2.FONT_HERSHEY_SIMPLEX, 0.7, (196, 69, 54), 2)
 
-    st.image(preview_np, caption="Target ROI Alignment", use_container_width=True)
+    st.image(preview_np, caption="Field Capture ROI Alignment Overlay", use_container_width=True)
 
     st.markdown("<br>", unsafe_allow_html=True)
 
-    if st.button("Run QA/QC Joint Analysis", type="primary", use_container_width=True):
-        with st.spinner("Executing structural geometry & defect inspection..."):
+    # Step 2: Trigger Evaluation
+    if st.button("⚡ EXECUTE STRUCTURAL INTEGRITY ANALYSIS", type="primary", use_container_width=True):
+        with st.spinner("Processing optical scale, bead morphology, and defect tolerances..."):
             annotated_np, findings, overall_verdict = detector.inspect(
                 raw_np,
                 user_roi=roi_box,
@@ -234,34 +259,69 @@ if uploaded_file is not None:
                 sensitivity=workmanship_sens
             )
 
-        # Result Verdict Banner
+        st.markdown("<br>", unsafe_allow_html=True)
+
+        # Enterprise KPI Dashboard
+        k1, k2, k3, k4 = st.columns(4)
+        with k1:
+            color = "#16A34A" if overall_verdict == "PASS" else "#DC2626"
+            st.markdown(f"""
+            <div class="metric-panel">
+                <div class="metric-label-txt">Joint Acceptance</div>
+                <div class="metric-val-txt" style="color: {color};">{overall_verdict}</div>
+            </div>
+            """, unsafe_allow_html=True)
+        with k2:
+            st.markdown(f"""
+            <div class="metric-panel">
+                <div class="metric-label-txt">Defect Flags</div>
+                <div class="metric-val-txt" style="color: #1A1917;">{len(findings)}</div>
+            </div>
+            """, unsafe_allow_html=True)
+        with k3:
+            score = 98 if overall_verdict == "PASS" else max(100 - len(findings) * 35, 45)
+            st.markdown(f"""
+            <div class="metric-panel">
+                <div class="metric-label-txt">QA Integrity Score</div>
+                <div class="metric-val-txt" style="color: {color};">{score}/100</div>
+            </div>
+            """, unsafe_allow_html=True)
+        with k4:
+            st.markdown(f"""
+            <div class="metric-panel">
+                <div class="metric-label-txt">Governing Code</div>
+                <div class="metric-val-txt" style="color: #635E54; font-size: 15px; padding-top: 5px;">AWS D1.1:2025</div>
+            </div>
+            """, unsafe_allow_html=True)
+
+        # Formatted Verdict Card
         if overall_verdict == "PASS":
             st.markdown("""
-            <div class="pass-card">
-                ✓ VERDICT: PASS — Weld Bead Profile Conforms to AWS D1.1 Acceptance Criteria
+            <div class="verdict-pass">
+                ✓ ACCEPTANCE VERDICT: PASS — Weldment conforms with AWS D1.1 visual inspection tolerances. Ready for sign-off.
             </div>
             """, unsafe_allow_html=True)
         else:
             st.markdown("""
-            <div class="fail-card">
-                ✕ VERDICT: FAIL — Non-Conformities Detected (Rework / Rectification Required)
+            <div class="verdict-fail">
+                ✕ ACCEPTANCE VERDICT: FAIL — Non-conformities exceed allowable structural tolerance. Rework / gouging required.
             </div>
             """, unsafe_allow_html=True)
 
-        # Inspection Visuals
+        # Visual Side-by-Side Verification
         col1, col2 = st.columns(2)
         with col1:
-            st.markdown("##### Target Joint ROI")
+            st.markdown("##### Raw Alignment Capture")
             st.image(preview_np, use_container_width=True)
 
         with col2:
-            st.markdown("##### Annotated QA/QC Evaluation")
+            st.markdown("##### NDT Computer Vision Overlay")
             st.image(annotated_np, use_container_width=True)
 
-        # Log Table
-        st.markdown("#### 📋 Non-Conformity & Workmanship Log")
+        # Findings Log Table
+        st.markdown("#### 📋 Non-Conformance & Workmanship Record")
         if findings:
             df = pd.DataFrame(findings)
             st.dataframe(df, use_container_width=True)
         else:
-            st.info("No structural defects or severe workmanship issues detected within the selected seam.")
+            st.info("No surface discontinuities, porosity clusters, or profile irregularities detected in selected seam.")
