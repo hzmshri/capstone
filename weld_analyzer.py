@@ -29,28 +29,26 @@ class WeldDefectDetector:
         edges = cv2.Canny(blurred, 50, 150)
         contours, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         
-        bead_widths = []
+        bead_width_mm = 0.0
+        bead_len_mm = 0.0
+
         if contours:
             largest_contour = max(contours, key=cv2.contourArea)
             rect = cv2.minAreaRect(largest_contour)
             box = cv2.boxPoints(rect)
-            box = np.int0(box)
+            box = np.int32(box)  # Fixed for NumPy 2.0+ compatibility
             
-            # Approximate bead dimensions
             w, h = rect[1]
             bead_width_mm = min(w, h) * mm_per_pixel
             bead_len_mm = max(w, h) * mm_per_pixel
-        else:
-            bead_width_mm = 0.0
-            bead_len_mm = 0.0
 
-        # 2. Spatter & High-Frequency Noise (Pitting/Spatter dots)
+        # 2. Spatter & High-Frequency Noise
         thresh_spatter = cv2.adaptiveThreshold(
             gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, 11, 4
         )
         spatter_pixel_count = cv2.countNonZero(thresh_spatter)
         total_pixels = image_np.shape[0] * image_np.shape[1]
-        spatter_ratio = (spatter_pixel_count / total_pixels) * 100
+        spatter_ratio = (spatter_pixel_count / max(total_pixels, 1)) * 100
 
         # 3. Workmanship Scoring & Defect Assessment
         workmanship_flags = []
@@ -63,8 +61,7 @@ class WeldDefectDetector:
                 "Verdict": "REJECT (Poor Surface Preparation / High Current)"
             })
             
-        # Check for uneven bead profile / waviness
-        edge_pixel_density = cv2.countNonZero(edges) / total_pixels
+        edge_pixel_density = cv2.countNonZero(edges) / max(total_pixels, 1)
         if edge_pixel_density > 0.08:
             workmanship_flags.append({
                 "Defect": "Irregular Bead Profile / Undercut Wave",
