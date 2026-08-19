@@ -1,8 +1,8 @@
 import streamlit as st
 import numpy as np
 import pandas as pd
+import cv2
 from PIL import Image
-from streamlit_drawable_canvas import st_canvas
 from weld_analyzer import WeldDefectDetector
 
 st.set_page_config(page_title="WeldQC - AI Inspection System", layout="wide")
@@ -21,58 +21,37 @@ uploaded_file = st.file_uploader("Upload Steel Weld Joint Capture (JPG / PNG / B
 
 if uploaded_file is not None:
     raw_img = Image.open(uploaded_file).convert("RGB")
-    img_w, img_h = raw_img.size
+    raw_np = np.array(raw_img)
+    img_h, img_w, _ = raw_np.shape
 
-    # Scale canvas display for large images to fit UI smoothly
-    max_display_w = 700
-    display_scale = min(1.0, max_display_w / img_w)
-    disp_w = int(img_w * display_scale)
-    disp_h = int(img_h * display_scale)
-    preview_img = raw_img.resize((disp_w, disp_h))
+    st.subheader("Step 1: Frame the Weld Seam (Exclude Background & Bolts)")
+    
+    # Coordinate framing sliders
+    col_x, col_y = st.columns(2)
+    with col_x:
+        x_range = st.slider("Horizontal Seam Area (% of Width)", 0, 100, (15, 85))
+    with col_y:
+        y_range = st.slider("Vertical Seam Area (% of Height)", 0, 100, (15, 85))
 
-    st.subheader("Step 1: Highlight Weld Seam")
-    st.caption("Drag a rectangle box over the weld bead to exclude all background metal & bolts.")
+    # Convert percentages to pixel bounding box
+    rx = int((x_range[0] / 100.0) * img_w)
+    ry = int((y_range[0] / 100.0) * img_h)
+    rw = int(((x_range[1] - x_range[0]) / 100.0) * img_w)
+    rh = int(((y_range[1] - y_range[0]) / 100.0) * img_h)
+    roi_box = (rx, ry, max(rw, 10), max(rh, 10))
 
-    # Interactive Drawing Canvas
-    canvas_result = st_canvas(
-        fill_color="rgba(255, 0, 0, 0.2)",
-        stroke_width=2,
-        stroke_color="#FF0000",
-        background_image=preview_img,
-        update_streamlit=True,
-        height=disp_h,
-        width=disp_w,
-        drawing_mode="rect",
-        key="weld_canvas",
-    )
+    # Live Preview with Bounding Box Overlay
+    preview_np = raw_np.copy()
+    cv2.rectangle(preview_np, (rx, ry), (rx + rw, ry + rh), (255, 50, 50), 3)
+    cv2.putText(preview_np, "Selected Weld Seam ROI", (rx, max(ry - 10, 25)), 
+                cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 50, 50), 2)
 
-    # Check if a box was drawn
-    roi_box = None
-    if canvas_result.json_data is not None:
-        objects = canvas_result.json_data.get("objects", [])
-        if len(objects) > 0:
-            last_rect = objects[-1]
-            # Convert canvas coordinates back to original image resolution
-            rx = int(last_rect["left"] / display_scale)
-            ry = int(last_rect["top"] / display_scale)
-            rw = int(last_rect["width"] / display_scale)
-            rh = int(last_rect["height"] / display_scale)
-            
-            # Ensure valid bounds
-            rx = max(0, rx)
-            ry = max(0, ry)
-            rw = min(img_w - rx, rw)
-            rh = min(img_h - ry, rh)
-            
-            if rw > 10 and rh > 10:
-                roi_box = (rx, ry, rw, rh)
+    st.image(preview_np, caption="Adjust sliders above to tightly box the weld bead.", use_container_width=True)
 
     st.divider()
 
-    # Step 2: Trigger Analysis
-    if st.button("Run Joint Analysis", type="primary"):
-        raw_np = np.array(raw_img)
-
+    # Step 2: Run Analysis
+    if st.button("Run QA/QC Joint Analysis", type="primary"):
         with st.spinner("Analyzing isolated weld seam geometry..."):
             annotated_np, findings, overall_verdict = detector.inspect(
                 raw_np,
@@ -83,11 +62,11 @@ if uploaded_file is not None:
 
         col1, col2 = st.columns(2)
         with col1:
-            st.subheader("Original Capture")
-            st.image(raw_img, use_container_width=True)
+            st.subheader("Analyzed Joint Framing")
+            st.image(preview_np, use_container_width=True)
 
         with col2:
-            st.subheader("QA/QC Annotated Seam")
+            st.subheader("QA/QC Annotated Verdict")
             st.image(annotated_np, use_container_width=True)
 
         st.divider()
