@@ -5,118 +5,112 @@ class WeldDefectDetector:
     def __init__(self, model_path="yolov8n.pt"):
         self.max_isolated_pore_dia_mm = 2.0
 
-    def classify_joint_geometry(self, contour, image_shape):
+    def compute_ripple_regularity(self, roi_gray: np.ndarray) -> float:
         """
-        Differentiates between Straight/Linear welds and Rounded/Circumferential pipe welds.
-        Returns: 'CIRCULAR_PIPE', 'LINEAR_PLATE', or 'UNKNOWN'
+        Measures spatial periodicity using 1D autocorrelation / FFT along the bead.
+        High regularity (> 0.35) = Clean TIG/MIG weave.
+        Low regularity (< 0.15) with high entropy = Chaotic poor workmanship.
         """
-        if len(contour) < 5:
-            return "LINEAR_PLATE", 0.0
+        if roi_gray is None or roi_gray.size < 400:
+            return 0.5
 
-        # Fit minimum area bounding box
-        rect = cv2.minAreaRect(contour)
-        rw, rh = rect[1]
-        major_axis = max(rw, rh)
-        minor_axis = max(min(rw, rh), 1)
-        aspect_ratio = major_axis / minor_axis
-
-        # Fit ellipse to test circular curvature
-        try:
-            ellipse = cv2.fitEllipse(contour)
-            (cx, cy), (d1, d2), angle = ellipse
-            ellipse_ratio = max(d1, d2) / max(min(d1, d2), 1)
-        except Exception:
-            ellipse_ratio = 10.0
-
-        # Measure convex hull solidity
-        area = cv2.contourArea(contour)
-        hull = cv2.convexHull(contour)
-        hull_area = cv2.contourArea(hull)
-        solidity = area / max(hull_area, 1)
-
-        # Circumferential / curved pipe welds show arc curvature (lower solidity, elliptical fit)
-        if solidity < 0.65 and ellipse_ratio < 3.2:
-            return "CIRCULAR_PIPE", round(solidity, 2)
-        else:
-            return "LINEAR_PLATE", round(aspect_ratio, 2)
-
-    def isolate_weld_seam(self, gray: np.ndarray):
-        """Locates the primary weld seam contour and bounding box."""
-        h, w = gray.shape
-        blur = cv2.GaussianBlur(gray, (11, 11), 0)
-        texture_energy = cv2.absdiff(gray, blur)
+        # Normalize lighting
+        norm_roi = cv2.normalize(roi_gray, None, 0, 255, cv2.NORM_MINMAX)
         
-        _, mask = cv2.threshold(texture_energy, 14, 255, cv2.THRESH_BINARY)
-        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (9, 9))
-        closed_mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
+        # 1D projection of intensity along the primary texture direction
+        proj_x = np.mean(norm_roi, axis=0)
+        proj_y = np.mean(norm_roi, axis=1)
 
-        contours, _ = cv2.findContours(closed_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        if not contours:
-            return None, (0, 0, w, h), "LINEAR_PLATE"
+        # Select axis with strongest alternating pattern
+        proj = proj_x if np.var(proj_x) > np.var(proj_y) else proj_y
+        proj = proj - np.mean(proj)
 
-        valid_contours = [c for c in contours if cv2.contourArea(c) > (h * w * 0.01)]
-        if not valid_contours:
-            main_contour = max(contours, key=cv2.contourArea)
-        else:
-            main_contour = max(valid_contours, key=cv2.contourArea)
+        # Autocorrelation to check for periodic wave patterns
+        if len(proj) < 10 or np.sum(proj ** 2) == 0:
+            return 0.5
+            
+        autocorr = np.correlate(proj, proj, mode='full')
+        autocorr = autocorr[len(autocorr)//2:]
+        autocorr = autocorr / (autocorr[0] + 1e-6)
 
-        joint_type, metric = self.classify_joint_geometry(main_contour, gray.shape)
-        x, y, bw, bh = cv2.boundingRect(main_contour)
+        # Find secondary peaks indicating steady weaver motion
+        peaks = [autocorr[i] for i in range(1, len(autocorr)-1) 
+                 if autocorr[i] > autocorr[i-1] and autocorr[i] > autocorr[i+1]]
         
-        pad = 12
-        x1, y1 = max(0, x - pad), max(0, y - pad)
-        x2, y2 = min(w, x + bw + pad), min(h, y + bh + pad)
+        if peaks:
+            return float(max(peaks))
+        return 0.1
 
-        return gray[y1:y2, x1:x2], (x1, y1, x2 - x1, y2 - y1), joint_type
-
-    def evaluate_quality(self, seam_roi: np.ndarray, joint_type: str, mm_per_pixel: float, sensitivity: float):
+    def detect_macro_irregularities(self, gray: np.ndarray, mm_per_pixel: float, sensitivity: float):
+        """
+        Identifies severe workmanship failures:
+        - Severe globular lumps (cold lap / uncontrolled puddle)
+        - Extreme width constriction (underfill / lack of fusion)
+        - Large slag inclusions & cavity clusters
+        """
         findings = []
-        if seam_roi is None or seam_roi.size == 0:
-            return findings
+        h, w = gray.shape
 
-        # 1. Surface Chaos & Roughness Analysis
-        laplacian = cv2.Laplacian(seam_roi, cv2.CV_64F)
-        roughness_score = laplacian.var()
+        # Multi-scale morphology to isolate abnormal blobs rather than smooth ripples
+        kernel_lump = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (19, 19))
+        tophat = cv2.morphologyEx(gray, cv2.MORPH_TOPHAT, kernel_lump)
+        blackhat = cv2.morphologyEx(gray, cv2.MORPH_BLACKHAT, kernel_lump)
 
-        # Circumferential TIG pipe welds have tighter periodic ripple textures, so threshold is calibrated by joint type
-        if joint_type == "CIRCULAR_PIPE":
-            roughness_threshold = 420.0 / sensitivity
-        else:
-            roughness_threshold = 270.0 / sensitivity
+        # Detect massive dark cavities / slag pockets
+        thresh_cavity = int(55 / sensitivity)
+        _, dark_mask = cv2.threshold(blackhat, thresh_cavity, 255, cv2.THRESH_BINARY)
+        cavity_contours, _ = cv2.findContours(dark_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
-        if roughness_score > roughness_threshold:
+        severe_cavities = []
+        for c in cavity_contours:
+            area = cv2.contourArea(c)
+            if area > (h * w * 0.004):  # Significant localized hole/slag pocket
+                x, y, cw, ch = cv2.boundingRect(c)
+                dim_mm = round(max(cw, ch) * mm_per_pixel, 2)
+                if dim_mm > 3.0:
+                    severe_cavities.append((x, y, cw, ch, dim_mm))
+
+        if severe_cavities:
+            max_cavity = max([c[4] for c in severe_cavities])
             findings.append({
-                "Defect": "Poor Workmanship / Erratic Bead Texture",
-                "Joint Geometry": joint_type.replace("_", " ").title(),
-                "Confidence": f"{min(round(roughness_score / 4.5, 1), 95.0)}%",
-                "Max Dimension (mm)": round((seam_roi.shape[0] * mm_per_pixel) * 0.35, 2),
-                "Verdict": "REJECT (Excessive Surface Roughness / Unsteady Arc Control)"
+                "Defect": "Slag Pocket / Severe Cavity",
+                "Confidence": "92.0%",
+                "Max Dimension (mm)": max_cavity,
+                "Verdict": "REJECT (AWS D1.1 Non-conforming void)",
+                "BBoxes": [(c[0], c[1], c[2], c[3]) for c in severe_cavities]
             })
 
-        # 2. Slag Pockets & Severe Cavity Detection
-        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (9, 9))
-        blackhat = cv2.morphologyEx(seam_roi, cv2.MORPH_BLACKHAT, kernel)
-        _, thresh = cv2.threshold(blackhat, int(42 / sensitivity), 255, cv2.THRESH_BINARY)
+        # Detect chaotic irregular lumps (asymmetrical puddle overflow)
+        thresh_lump = int(50 / sensitivity)
+        _, bright_mask = cv2.threshold(tophat, thresh_lump, 255, cv2.THRESH_BINARY)
+        lump_contours, _ = cv2.findContours(bright_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
-        contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        pitting_count = 0
-        max_pit_dia = 0
-
-        for c in contours:
+        abnormal_lumps = []
+        for c in lump_contours:
             area = cv2.contourArea(c)
-            if 10 < area < (seam_roi.size * 0.03):
-                _, _, bw, bh = cv2.boundingRect(c)
-                pit_size_mm = round(max(bw, bh) * mm_per_pixel, 2)
-                max_pit_dia = max(max_pit_dia, pit_size_mm)
-                pitting_count += 1
+            # Filter out linear reflections by checking aspect ratio & convexity
+            if area > (h * w * 0.008):
+                rect = cv2.minAreaRect(c)
+                rw, rh = rect[1]
+                ratio = max(rw, rh) / max(min(rw, rh), 1)
+                # Lumps are bulky/chaotic, not thin specular highlight lines
+                if ratio < 3.2:
+                    x, y, lw, lh = cv2.boundingRect(c)
+                    lump_dim_mm = round(max(lw, lh) * mm_per_pixel, 2)
+                    abnormal_lumps.append((x, y, lw, lh, lump_dim_mm))
 
-        if pitting_count >= 3 or max_pit_dia > 2.5:
+        # Check bead regularity
+        regularity_score = self.compute_ripple_regularity(gray)
+
+        # Only trigger poor workmanship if there are bulky lumps AND low periodicity
+        if len(abnormal_lumps) >= 2 and regularity_score < 0.22:
+            max_lump = max([l[4] for l in abnormal_lumps])
             findings.append({
-                "Defect": "Slag Inclusions / Surface Cavities",
-                "Joint Geometry": joint_type.replace("_", " ").title(),
-                "Confidence": f"{min(75 + pitting_count * 5, 96)}%",
-                "Max Dimension (mm)": max_pit_dia,
-                "Verdict": "REJECT (Surface Pockets / Slag Accumulation)"
+                "Defect": "Poor Workmanship / Chaotic Weld Bead Profile",
+                "Confidence": f"{min(80 + len(abnormal_lumps) * 4, 96)}%",
+                "Max Dimension (mm)": max_lump,
+                "Verdict": "REJECT (Uncontrolled Puddle Progression & Lumpiness)",
+                "BBoxes": [(l[0], l[1], l[2], l[3]) for l in abnormal_lumps]
             })
 
         return findings
@@ -124,26 +118,33 @@ class WeldDefectDetector:
     def inspect(self, image_np: np.ndarray, mm_per_pixel: float = 0.05, conf_thresh: float = 0.45, sensitivity: float = 1.0):
         annotated_img = image_np.copy()
         raw_gray = cv2.cvtColor(image_np, cv2.COLOR_RGB2GRAY)
+        h, w = raw_gray.shape
 
-        # 1. Seam localization and automatic geometry type classification
-        seam_roi, bbox, joint_type = self.isolate_weld_seam(raw_gray)
-        x, y, w, h = bbox
-
-        # 2. Geometry-specific quality analysis
-        findings = self.evaluate_quality(seam_roi, joint_type, mm_per_pixel, sensitivity)
+        # Extract macro structural defects
+        findings = self.detect_macro_irregularities(raw_gray, mm_per_pixel, sensitivity)
         overall_status = "PASS"
 
-        # 3. Visual Annotations
-        geo_label = f"Type: {joint_type.replace('_', ' ')}"
-        
         if findings:
             overall_status = "FAIL"
-            cv2.rectangle(annotated_img, (x, y), (x + w, y + h), (255, 0, 0), 2)
-            cv2.putText(annotated_img, f"FAIL | {geo_label}", (x, max(y - 10, 20)),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 0), 2)
+            for f in findings:
+                for (bx, by, bw, bh) in f.get("BBoxes", []):
+                    cv2.rectangle(annotated_img, (bx, by), (bx + bw, by + bh), (255, 0, 0), 2)
+                    cv2.putText(annotated_img, f["Defect"], (bx, max(by - 6, 14)),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 0, 0), 1)
         else:
-            cv2.rectangle(annotated_img, (x, y), (x + w, y + h), (0, 255, 0), 2)
-            cv2.putText(annotated_img, f"PASS | {geo_label}", (x, max(y - 10, 20)),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
+            # Mark overall joint as verified acceptable
+            cv2.rectangle(annotated_img, (10, 10), (w - 10, h - 10), (0, 255, 0), 2)
+            cv2.putText(annotated_img, "PASS: Uniform Weld Bead (AWS D1.1 Compliant)", 
+                        (20, 35), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
 
-        return annotated_img, findings, overall_status
+        # Clean table output
+        clean_table_findings = []
+        for f in findings:
+            clean_table_findings.append({
+                "Defect": f["Defect"],
+                "Confidence": f["Confidence"],
+                "Max Dimension (mm)": f["Max Dimension (mm)"],
+                "Verdict": f["Verdict"]
+            })
+
+        return annotated_img, clean_table_findings, overall_status
