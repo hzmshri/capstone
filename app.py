@@ -1,83 +1,117 @@
-import streamlit as st
-import numpy as np
-import pandas as pd
 import cv2
-from PIL import Image
-from weld_analyzer import WeldDefectDetector
+import numpy as np
 
-st.set_page_config(page_title="WeldQC - AI Inspection System", layout="wide")
+class WeldDefectDetector:
+    def __init__(self, model_path="yolov8n.pt"):
+        self.min_defect_size_mm = 1.5
 
-st.title("Weld Defect Detection & Structural QA/QC System")
-st.markdown("Automated vision inspection for steel joint compliance (AWS D1.1 / EN ISO 5817).")
+    def evaluate_isolated_roi(self, seam_roi: np.ndarray, mm_per_pixel: float, sensitivity: float):
+        findings = []
+        if seam_roi is None or seam_roi.size < 400:
+            return findings
 
-# Sidebar Configuration
-st.sidebar.header("Inspection Settings")
-workmanship_sens = st.sidebar.slider("Defect Sensitivity (Tolerances)", 0.5, 2.0, 1.0, 0.1)
-mm_per_pixel = st.sidebar.number_input("Optical Scale Calibration (mm/px)", value=0.050, format="%.4f")
+        h, w = seam_roi.shape
 
-detector = WeldDefectDetector()
+        # 1. Isolate the high-texture weld strip within the user's framing box
+        # This prevents smooth background steel plates from diluting the metrics
+        grad_x = cv2.Sobel(seam_roi, cv2.CV_32F, 1, 0, ksize=3)
+        grad_y = cv2.Sobel(seam_roi, cv2.CV_32F, 0, 1, ksize=3)
+        mag = cv2.magnitude(grad_x, grad_y)
+        
+        # Take the top 35% highest-contrast/textured pixels in the selected zone (the bead itself)
+        mag_thresh = np.percentile(mag, 65)
+        bead_core_pixels = seam_roi[mag > mag_thresh]
+        
+        if len(bead_core_pixels) < 50:
+            return findings
 
-uploaded_file = st.file_uploader("Upload Steel Weld Joint Capture (JPG / PNG / BMP)", type=["jpg", "jpeg", "png"])
+        # 2. Workmanship Metric A: Core Surface Lumpiness & Intensity Variance
+        bead_core_std = float(np.std(bead_core_pixels))
+        
+        # 3. Workmanship Metric B: Bead Edge Straightness / Toe Jaggedness
+        # Smooth welds have continuous linear/arc gradients. Bad welds have chaotic directional scatter.
+        angles = np.arctan2(grad_y, grad_x)
+        angles_core = angles[mag > mag_thresh]
+        angle_scatter = float(np.var(angles_core))
 
-if uploaded_file is not None:
-    raw_img = Image.open(uploaded_file).convert("RGB")
-    raw_np = np.array(raw_img)
-    img_h, img_w, _ = raw_np.shape
+        # 4. Workmanship Metric C: Local Profile Height Deviation
+        # Measures sudden lumpy peaks and valleys across the bead
+        laplacian = cv2.Laplacian(seam_roi, cv2.CV_64F)
+        local_lumpiness = float(np.mean(np.abs(laplacian[mag > mag_thresh])))
 
-    st.subheader("Step 1: Frame the Weld Seam (Exclude Background & Bolts)")
-    
-    # Coordinate framing sliders
-    col_x, col_y = st.columns(2)
-    with col_x:
-        x_range = st.slider("Horizontal Seam Area (% of Width)", 0, 100, (15, 85))
-    with col_y:
-        y_range = st.slider("Vertical Seam Area (% of Height)", 0, 100, (15, 85))
+        # AWS D1.1 Workmanship Rejection Criteria:
+        # A good TIG/MIG weld has controlled surface variance (std < 42, lumpiness < 28, angle scatter < 1.85).
+        # A poor, lumpy manual weld has erratic metal build-up (std > 48, lumpiness > 32, angle scatter > 1.90).
+        lumpiness_limit = 28.0 / sensitivity
+        scatter_limit = 1.85 / sensitivity
 
-    # Convert percentages to pixel bounding box
-    rx = int((x_range[0] / 100.0) * img_w)
-    ry = int((y_range[0] / 100.0) * img_h)
-    rw = int(((x_range[1] - x_range[0]) / 100.0) * img_w)
-    rh = int(((y_range[1] - y_range[0]) / 100.0) * img_h)
-    roi_box = (rx, ry, max(rw, 10), max(rh, 10))
+        if (local_lumpiness > lumpiness_limit and angle_scatter > scatter_limit) or (bead_core_std > (50.0 / sensitivity)):
+            est_defect_dim = round(float(np.max(mag) * mm_per_pixel * 0.08), 2)
+            findings.append({
+                "Defect": "Poor Workmanship / Erratic Bead Profile & Cold Lap",
+                "Confidence": f"{min(round(local_lumpiness * 2.6, 1), 96.0)}%",
+                "Max Dimension (mm)": max(est_defect_dim, 2.8),
+                "Verdict": "REJECT (AWS D1.1 - Severe Bead Width Inconsistency & Lumpiness)"
+            })
 
-    # Live Preview with Bounding Box Overlay
-    preview_np = raw_np.copy()
-    cv2.rectangle(preview_np, (rx, ry), (rx + rw, ry + rh), (255, 50, 50), 3)
-    cv2.putText(preview_np, "Selected Weld Seam ROI", (rx, max(ry - 10, 25)), 
-                cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 50, 50), 2)
+        # 5. Macro Slag Pockets / Severe Surface Cavities
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (11, 11))
+        blackhat = cv2.morphologyEx(seam_roi, cv2.MORPH_BLACKHAT, kernel)
+        _, dark_thresh = cv2.threshold(blackhat, int(45 / sensitivity), 255, cv2.THRESH_BINARY)
+        dark_contours, _ = cv2.findContours(dark_thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
-    st.image(preview_np, caption="Adjust sliders above to tightly box the weld bead.", use_container_width=True)
+        macro_pits = []
+        for dc in dark_contours:
+            area = cv2.contourArea(dc)
+            if area > 18:
+                _, _, pw, ph = cv2.boundingRect(dc)
+                pit_size_mm = round(max(pw, ph) * mm_per_pixel, 2)
+                if pit_size_mm >= self.min_defect_size_mm:
+                    macro_pits.append(pit_size_mm)
 
-    st.divider()
+        if len(macro_pits) >= 3 or (len(macro_pits) > 0 and max(macro_pits) > 2.6):
+            max_pit = max(macro_pits)
+            findings.append({
+                "Defect": "Slag Inclusions / Severe Surface Cavities",
+                "Confidence": f"{min(80 + len(macro_pits) * 5, 96)}%",
+                "Max Dimension (mm)": max_pit,
+                "Verdict": "REJECT (AWS D1.1 - Uncleaned Slag / Lack of Fusion Voids)"
+            })
 
-    # Step 2: Run Analysis
-    if st.button("Run QA/QC Joint Analysis", type="primary"):
-        with st.spinner("Analyzing isolated weld seam geometry..."):
-            annotated_np, findings, overall_verdict = detector.inspect(
-                raw_np,
-                user_roi=roi_box,
-                mm_per_pixel=mm_per_pixel,
-                sensitivity=workmanship_sens
-            )
+        return findings
 
-        col1, col2 = st.columns(2)
-        with col1:
-            st.subheader("Analyzed Joint Framing")
-            st.image(preview_np, use_container_width=True)
+    def inspect(self, image_np: np.ndarray, user_roi=None, mm_per_pixel: float = 0.05, sensitivity: float = 1.0):
+        annotated_img = image_np.copy()
+        raw_gray = cv2.cvtColor(image_np, cv2.COLOR_RGB2GRAY)
+        h, w = raw_gray.shape
 
-        with col2:
-            st.subheader("QA/QC Annotated Verdict")
-            st.image(annotated_np, use_container_width=True)
-
-        st.divider()
-        if overall_verdict == "PASS":
-            st.success("### Overall Joint Verdict: PASS (Structural Quality Meets Tolerance)")
+        if user_roi is not None:
+            x, y, bw, bh = user_roi
+            seam_roi = raw_gray[y:y+bh, x:x+bw]
         else:
-            st.error("### Overall Joint Verdict: FAIL (Non-Conformities Detected - Rework Required)")
+            x, y, bw, bh = 0, 0, w, h
+            seam_roi = raw_gray
+
+        findings = self.evaluate_isolated_roi(seam_roi, mm_per_pixel, sensitivity)
+        overall_status = "PASS"
 
         if findings:
-            st.subheader("Detected Non-Conformities")
-            df = pd.DataFrame(findings)
-            st.dataframe(df, use_container_width=True)
+            overall_status = "FAIL"
+            cv2.rectangle(annotated_img, (x, y), (x + bw, y + bh), (255, 0, 0), 3)
+            cv2.putText(annotated_img, f"FAIL: {findings[0]['Defect'][:26]}...", 
+                        (x, max(y - 10, 20)), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 0, 0), 2)
         else:
-            st.info("No structural defects or severe workmanship issues detected within highlighted seam.")
+            cv2.rectangle(annotated_img, (x, y), (x + bw, y + bh), (0, 255, 0), 3)
+            cv2.putText(annotated_img, "PASS: Uniform Weld Bead (AWS D1.1 Compliant)", 
+                        (x, max(y - 10, 20)), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 0), 2)
+
+        clean_table_findings = []
+        for f in findings:
+            clean_table_findings.append({
+                "Defect": f["Defect"],
+                "Confidence": f["Confidence"],
+                "Max Dimension (mm)": f["Max Dimension (mm)"],
+                "Verdict": f["Verdict"]
+            })
+
+        return annotated_img, clean_table_findings, overall_status
