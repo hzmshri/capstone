@@ -86,7 +86,7 @@ st.markdown("""
 
     /* Structural KPI Metric Badges */
     .metric-panel {
-        background: #141414;
+        background: #FFFFFF;
         border: 1px solid #DCD6C8;
         border-radius: 6px;
         padding: 14px 18px;
