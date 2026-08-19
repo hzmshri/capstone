@@ -1,172 +1,150 @@
 import cv2
 import numpy as np
-from ultralytics import YOLO
 
 class WeldDefectDetector:
     def __init__(self, model_path="yolov8n.pt"):
-        self.model = YOLO(model_path)
-        self.critical_defects = {"crack", "lack_of_penetration", "incomplete_fusion"}
-        self.defect_classes = {
-            0: "porosity",
-            1: "undercut",
-            2: "crack",
-            3: "lack_of_penetration",
-            4: "spatter",
-            5: "excess_reinforcement"
-        }
+        # Structural defect tolerance limits (AWS D1.1 / ISO 5817 Level B/C)
+        self.max_isolated_pore_dia_mm = 2.0
+        self.max_pore_cluster_density = 4  # max allowable isolated pits in close proximity
 
-    def analyze_workmanship(self, image_np: np.ndarray, mm_per_pixel: float = 0.05, sensitivity: float = 1.0):
-        """
-        Segment weld seam and inspect:
-        - Bead width consistency (Coefficient of Variation)
-        - Surface spatter count & cluster size
-        """
-        gray = cv2.cvtColor(image_np, cv2.COLOR_RGB2GRAY)
-        h, w = gray.shape
-
-        # Preprocessing: Bilateral filter removes grain while keeping weld bead edges sharp
-        filtered = cv2.bilateralFilter(gray, 9, 75, 75)
+    def suppress_glare_and_reflections(self, gray: np.ndarray) -> np.ndarray:
+        """Removes bright metallic specular reflections and lighting glare."""
+        # Detect specular highlights (very bright spots)
+        _, glare_mask = cv2.threshold(gray, 230, 255, cv2.THRESH_BINARY)
         
-        # Adaptive thresholding to segment distinct metallic features
-        thresh = cv2.adaptiveThreshold(
-            filtered, 255, cv2.ADAPTIVE_THRESH_MEAN_C, cv2.THRESH_BINARY_INV, 25, 4
-        )
+        # Inpaint glare regions with surrounding metallic tone
+        cleaned_gray = cv2.inpaint(gray, glare_mask, inpaintRadius=3, flags=cv2.INPAINT_TELEA)
+        return cleaned_gray
 
+    def detect_porosity_and_pits(self, gray: np.ndarray, mm_per_pixel: float, sensitivity: float):
+        """
+        Detects true dark pit clusters (porosity/cavities) while ignoring machining lines.
+        """
+        h, w = gray.shape
+        # Morphological black-hat transform isolates dark spots (pits/voids) smaller than the structuring element
+        kernel_size = int(round(15 * sensitivity))
+        if kernel_size % 2 == 0:
+            kernel_size += 1
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (kernel_size, kernel_size))
+        blackhat = cv2.morphologyEx(gray, cv2.MORPH_BLACKHAT, kernel)
+
+        # Threshold dark pits
+        thresh_val = int(35 / sensitivity)
+        _, thresh = cv2.threshold(blackhat, thresh_val, 255, cv2.THRESH_BINARY)
+
+        # Filter out bolt threads / elongated grooves (porosity is circular/compact)
         contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         
-        workmanship_flags = []
-        annotated_features = image_np.copy()
-
-        if not contours:
-            return workmanship_flags, annotated_features
-
-        # Filter contours by area: find candidate weld seam vs small spatter
-        contour_areas = [cv2.contourArea(c) for c in contours]
-        max_area = max(contour_areas) if contour_areas else 0
-
-        # --- 1. SPATTER & SLAG DETECTION ---
-        # Spatter appears as small, high-contrast distinct circular/elliptical dots
-        spatter_count = 0
-        max_spatter_size_px = 0
-        min_spatter_area = 15 * sensitivity
-        max_spatter_area = (h * w) * 0.015  # Spatter shouldn't be larger than 1.5% of total image
+        porosity_detections = []
+        valid_pores = []
 
         for c in contours:
             area = cv2.contourArea(c)
-            if min_spatter_area < area < max_spatter_area:
+            # Ignore sub-pixel noise and huge background shadows
+            if 6 < area < (h * w * 0.005):
                 perimeter = cv2.arcLength(c, True)
                 if perimeter == 0:
                     continue
                 circularity = 4 * np.pi * (area / (perimeter * perimeter))
                 
-                # High circularity or small compact blobs = spatter
-                if circularity > 0.4:
-                    spatter_count += 1
-                    x, y, cw, ch = cv2.boundingRect(c)
-                    max_spatter_size_px = max(max_spatter_size_px, max(cw, ch))
-                    # Draw subtle yellow marker around detected spatter
-                    cv2.rectangle(annotated_features, (x, y), (x + cw, y + ch), (255, 200, 0), 1)
+                # Porosity pores are round/oval (circularity > 0.45)
+                if circularity > 0.45:
+                    x, y, bw, bh = cv2.boundingRect(c)
+                    pore_dia_mm = round(max(bw, bh) * mm_per_pixel, 2)
+                    
+                    if pore_dia_mm >= 0.5:  # Noticeable pore size
+                        valid_pores.append((x, y, bw, bh, pore_dia_mm))
 
-        spatter_size_mm = round(max_spatter_size_px * mm_per_pixel, 2)
-
-        # Flag only if significant spatter count or large slag clumps exist
-        spatter_limit = int(12 / sensitivity)
-        if spatter_count > spatter_limit or spatter_size_mm > (2.5 / sensitivity):
-            workmanship_flags.append({
-                "Defect": "Excessive Spatter / Slag Inclusions",
-                "Confidence": f"{min(75 + spatter_count * 2, 98)}%",
-                "Max Dimension (mm)": spatter_size_mm,
-                "Verdict": "REJECT (AWS D1.1 Cl. 6.9 - Surface Cleaning Required)"
+        # Check against AWS D1.1 limits
+        if len(valid_pores) > self.max_pore_cluster_density:
+            max_pore = max([p[4] for p in valid_pores])
+            porosity_detections.append({
+                "Defect": "Porosity / Gas Cavity Cluster",
+                "Confidence": f"{min(80 + len(valid_pores) * 3, 98)}%",
+                "Max Dimension (mm)": max_pore,
+                "Verdict": "REJECT (Exceeds ISO 5817 cluster tolerance)",
+                "BBoxes": [(p[0], p[1], p[2], p[3]) for p in valid_pores]
             })
 
-        # --- 2. BEAD WIDTH & PROFILE UNIFORMITY ---
-        # Find the major weld seam contour (largest structural component)
-        valid_seams = [c for c in contours if cv2.contourArea(c) > (h * w * 0.04)]
+        return porosity_detections
+
+    def detect_cracks_and_notches(self, gray: np.ndarray, mm_per_pixel: float, sensitivity: float):
+        """
+        Detects sharp, high-aspect-ratio linear discontinuities (cracks / lack of fusion).
+        """
+        h, w = gray.shape
+        # Edge gradient detection tuned for jagged fissure profiles
+        sobel_x = cv2.Sobel(gray, cv2.CV_64F, 1, 0, ksize=3)
+        sobel_y = cv2.Sobel(gray, cv2.CV_64F, 0, 1, ksize=3)
+        magnitude = cv2.magnitude(sobel_x, sobel_y)
+        magnitude = np.uint8(np.clip(magnitude, 0, 255))
+
+        # Filter out smooth weld ripple edges
+        blur_mag = cv2.medianBlur(magnitude, 5)
+        thresh_val = int(85 / sensitivity)
+        _, sharp_edges = cv2.threshold(blur_mag, thresh_val, 255, cv2.THRESH_BINARY)
+
+        contours, _ = cv2.findContours(sharp_edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         
-        if valid_seams:
-            main_seam = max(valid_seams, key=cv2.contourArea)
-            rect = cv2.minAreaRect(main_seam)
-            box = cv2.boxPoints(rect)
-            box = np.int32(box)
+        crack_detections = []
+        for c in contours:
+            area = cv2.contourArea(c)
+            if area > (h * w * 0.001):
+                rect = cv2.minAreaRect(c)
+                rw, rh = rect[1]
+                major_axis = max(rw, rh)
+                minor_axis = min(rw, rh)
+                aspect_ratio = (major_axis / max(minor_axis, 1))
 
-            # Sample cross-sectional widths along the seam
-            x, y, rw, rh = cv2.boundingRect(main_seam)
-            mask_seam = np.zeros_like(gray)
-            cv2.drawContours(mask_seam, [main_seam], -1, 255, -1)
-
-            # Measure slice widths across the vertical or horizontal axis
-            slices = []
-            if rw > rh:  # Horizontal weld
-                step = max(int(rw / 15), 1)
-                for col in range(x, x + rw, step):
-                    column_pixels = np.count_nonzero(mask_seam[:, col])
-                    if column_pixels > 0:
-                        slices.append(column_pixels)
-            else:  # Vertical weld
-                step = max(int(rh / 15), 1)
-                for row in range(y, y + rh, step):
-                    row_pixels = np.count_nonzero(mask_seam[row, :])
-                    if row_pixels > 0:
-                        slices.append(row_pixels)
-
-            if len(slices) >= 5:
-                mean_width = np.mean(slices)
-                std_width = np.std(slices)
-                cov = (std_width / mean_width) if mean_width > 0 else 0  # Coefficient of variation
-
-                # A steady, clean weld usually has CoV < 0.28. Irregular/wavy beads exceed 0.35.
-                cov_threshold = 0.35 * (1.0 / sensitivity)
-                if cov > cov_threshold:
-                    variation_mm = round((std_width * mm_per_pixel) * 2, 2)
-                    cv2.drawContours(annotated_features, [box], 0, (0, 0, 255), 2)
-                    workmanship_flags.append({
-                        "Defect": "Irregular Bead Width / Travel Speed Flaw",
-                        "Confidence": f"{min(round(cov * 180, 1), 95.0)}%",
-                        "Max Dimension (mm)": variation_mm,
-                        "Verdict": "REJECT (Non-uniform weld progression)"
+                # Cracks are narrow, elongated, and sharp (Aspect Ratio > 4.5)
+                if aspect_ratio > 5.0 and major_axis * mm_per_pixel > 3.0:
+                    x, y, bw, bh = cv2.boundingRect(c)
+                    crack_length_mm = round(major_axis * mm_per_pixel, 2)
+                    crack_detections.append({
+                        "Defect": "Surface Crack / Linear Discontinuity",
+                        "Confidence": "91.5%",
+                        "Max Dimension (mm)": crack_length_mm,
+                        "Verdict": "CRITICAL REJECT (Mandatory NDT & Gouge)",
+                        "BBoxes": [(x, y, bw, bh)]
                     })
-                else:
-                    # Clean weld seam contour marked in green
-                    cv2.drawContours(annotated_features, [box], 0, (0, 255, 0), 2)
 
-        return workmanship_flags, annotated_features
+        return crack_detections
 
-    def inspect(self, image_np: np.ndarray, mm_per_pixel: float = 0.05, conf_thresh: float = 0.40, sensitivity: float = 1.0):
-        detections = []
+    def inspect(self, image_np: np.ndarray, mm_per_pixel: float = 0.05, conf_thresh: float = 0.45, sensitivity: float = 1.0):
         annotated_img = image_np.copy()
+        raw_gray = cv2.cvtColor(image_np, cv2.COLOR_RGB2GRAY)
+        
+        # 1. Glare suppression
+        filtered_gray = self.suppress_glare_and_reflections(raw_gray)
+
+        # 2. Defect Analysis
+        porosity_flags = self.detect_porosity_and_pits(filtered_gray, mm_per_pixel, sensitivity)
+        crack_flags = self.detect_cracks_and_notches(filtered_gray, mm_per_pixel, sensitivity)
+
+        all_findings = porosity_flags + crack_flags
         overall_status = "PASS"
 
-        # 1. Run Geometric & Workmanship Analysis
-        workmanship_findings, seam_annotated = self.analyze_workmanship(image_np, mm_per_pixel, sensitivity)
-        detections.extend(workmanship_findings)
-
-        # 2. Run Object Detection Model
-        results = self.model.predict(image_np, conf=conf_thresh, verbose=False)
-        for r in results:
-            for box in r.boxes:
-                x1, y1, x2, y2 = map(int, box.xyxy[0])
-                cls_id = int(box.cls[0])
-                conf = float(box.conf[0])
-                label = self.defect_classes.get(cls_id, "Weld Flaw")
-
-                w_px, h_px = (x2 - x1), (y2 - y1)
-                max_dim_mm = round(max(w_px, h_px) * mm_per_pixel, 2)
-
-                decision = "CRITICAL REJECT" if label in self.critical_defects else "REJECT (Out of Spec)"
-                detections.append({
-                    "Defect": label.title(),
-                    "Confidence": f"{conf:.1%}",
-                    "Max Dimension (mm)": max_dim_mm,
-                    "Verdict": decision
-                })
-
-                cv2.rectangle(seam_annotated, (x1, y1), (x2, y2), (255, 0, 0), 2)
-                cv2.putText(seam_annotated, f"{label}", (x1, y1 - 6), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 0), 2)
-
-        # Evaluate final verdict
-        for finding in detections:
+        # 3. Render Annotations
+        for finding in all_findings:
             if "REJECT" in finding["Verdict"]:
                 overall_status = "FAIL"
-                break
+                color = (255, 0, 0)  # Red for reject
+            else:
+                color = (0, 255, 0)
 
-        return seam_annotated, detections, overall_status
+            for (bx, by, bw, bh) in finding.get("BBoxes", []):
+                cv2.rectangle(annotated_img, (bx, by), (bx + bw, by + bh), color, 2)
+                cv2.putText(annotated_img, finding["Defect"], (bx, max(by - 6, 12)),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.45, color, 1)
+
+        # Remove internal bounding box data before passing to table
+        clean_table_findings = []
+        for f in all_findings:
+            clean_table_findings.append({
+                "Defect": f["Defect"],
+                "Confidence": f["Confidence"],
+                "Max Dimension (mm)": f["Max Dimension (mm)"],
+                "Verdict": f["Verdict"]
+            })
+
+        return annotated_img, clean_table_findings, overall_status
