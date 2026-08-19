@@ -45,6 +45,16 @@ st.markdown("""
         color: #38342E;
         font-family: 'Space Grotesk', sans-serif;
     }
+    
+    /* Sidebar Input Labels & Field Labels */
+    section[data-testid="stSidebar"] label,
+    section[data-testid="stSidebar"] label p,
+    .stWidgetLabel p,
+    label p {
+        color: #1E1D1A !important;
+        font-weight: 600 !important;
+        font-size: 13px !important;
+    }
 
     /* Enterprise Job Header */
     .job-header-card {
