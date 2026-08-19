@@ -172,7 +172,7 @@ with st.sidebar:
     <div style="display: flex; align-items: center; gap: 10px; margin-bottom: 8px;">
         <span style="font-size: 24px;">📐</span>
         <div>
-            <div style="font-size: 16px; font-weight: 700; color: #1E1D1A;">WeldQC Enterprise</div>
+            <div style="font-size: 16px; font-weight: 700; color: #1E1D1A;">Welding Detector</div>
             <div style="font-size: 11px; color: #7A7468; font-family: 'JetBrains Mono';">v3.4.1 | AWS D1.1-2025</div>
         </div>
     </div>
