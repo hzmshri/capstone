@@ -48,7 +48,7 @@ st.markdown("""
 
     /* Enterprise Job Header */
     .job-header-card {
-        background: #FFFFFF;
+        background: #141414;
         border: 1px solid #DCD6C8;
         border-top: 4px solid #C44536;
         border-radius: 6px;
