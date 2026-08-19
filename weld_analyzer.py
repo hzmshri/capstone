@@ -3,19 +3,18 @@ import numpy as np
 
 class WeldDefectDetector:
     def __init__(self, model_path="yolov8n.pt"):
-        self.max_isolated_pore_dia_mm = 2.0
+        # AWS D1.1 / ISO 5817 minimum defect thresholds
+        self.min_defect_size_mm = 1.5  # Ignore micro-ripples and tiny sub-mm surface pits
 
     def isolate_weld_seam_contour(self, gray: np.ndarray):
         """Locates the primary weld seam using gradient magnitude and morphological filters."""
         h, w = gray.shape
 
-        # Multi-scale gradient
         grad_x = cv2.Sobel(gray, cv2.CV_32F, 1, 0, ksize=3)
         grad_y = cv2.Sobel(gray, cv2.CV_32F, 0, 1, ksize=3)
         mag = cv2.magnitude(grad_x, grad_y)
         mag = cv2.normalize(mag, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
 
-        # Enhance texture regions
         blurred = cv2.GaussianBlur(mag, (9, 9), 0)
         _, thresh = cv2.threshold(blurred, 35, 255, cv2.THRESH_BINARY)
         
@@ -26,12 +25,8 @@ class WeldDefectDetector:
         if not contours:
             return None, (0, 0, w, h)
 
-        # Filter out small noise; select main elongated seam
         valid_contours = [c for c in contours if cv2.contourArea(c) > (h * w * 0.01)]
-        if not valid_contours:
-            main_contour = max(contours, key=cv2.contourArea)
-        else:
-            main_contour = max(valid_contours, key=cv2.contourArea)
+        main_contour = max(valid_contours, key=cv2.contourArea) if valid_contours else max(contours, key=cv2.contourArea)
 
         x, y, bw, bh = cv2.boundingRect(main_contour)
         pad = 10
@@ -41,12 +36,6 @@ class WeldDefectDetector:
         return main_contour, (x1, y1, x2 - x1, y2 - y1)
 
     def evaluate_workmanship_quality(self, gray: np.ndarray, contour, bbox, mm_per_pixel: float, sensitivity: float):
-        """
-        Analyzes:
-        1. Local thickness consistency along the contour (handles curved & straight equally).
-        2. Gradient orientation entropy (chaotic vs uniform progression).
-        3. Dark slag pocket / cavity clusters.
-        """
         findings = []
         x, y, bw, bh = bbox
         roi_gray = gray[y:y+bh, x:x+bw]
@@ -59,59 +48,59 @@ class WeldDefectDetector:
         cv2.drawContours(mask, [contour], -1, 255, -1)
         dist_transform = cv2.distanceTransform(mask, cv2.DIST_L2, 5)
         
-        # Non-zero distance values represent local half-thickness along the seam
         dist_values = dist_transform[dist_transform > 1.0]
 
         if len(dist_values) > 50:
             mean_half_width = np.mean(dist_values)
             std_half_width = np.std(dist_values)
             thickness_cov = (std_half_width / mean_half_width) if mean_half_width > 0 else 0
+            fluctuation_mm = round((std_half_width * 2 * mm_per_pixel), 2)
 
-            # 2. Gradient Orientation Coherence (Measures puddle stability)
+            # Gradient Orientation Variance
             gx = cv2.Sobel(roi_gray, cv2.CV_32F, 1, 0, ksize=3)
             gy = cv2.Sobel(roi_gray, cv2.CV_32F, 0, 1, ksize=3)
-            
             angles = np.arctan2(gy, gx)
             mag = cv2.magnitude(gx, gy)
             
-            # Weighted angular variance in high-gradient regions
             significant_pixels = mag > np.mean(mag)
-            if np.sum(significant_pixels) > 50:
-                angular_entropy = np.var(angles[significant_pixels])
-            else:
-                angular_entropy = 0.5
+            angular_entropy = np.var(angles[significant_pixels]) if np.sum(significant_pixels) > 50 else 0.5
 
-            # Quality Check:
-            # Clean TIG/MIG welds (straight or curved) maintain low thickness CoV (<0.32) and structured entropy.
-            # Poor subcontractor welds show high thickness fluctuation (CoV > 0.42) and turbulent entropy (>1.85).
-            cov_thresh = 0.40 / sensitivity
-            entropy_thresh = 1.80 / sensitivity
+            # Must have high CoV (>0.52), chaotic entropy (>2.1), AND significant mm fluctuation (>2.2mm)
+            cov_thresh = 0.52 / sensitivity
+            entropy_thresh = 2.10 / sensitivity
+            min_variation_mm = 2.2 / sensitivity
 
-            if thickness_cov > cov_thresh and angular_entropy > entropy_thresh:
+            if thickness_cov > cov_thresh and angular_entropy > entropy_thresh and fluctuation_mm > min_variation_mm:
                 findings.append({
-                    "Defect": "Poor Workmanship / Erratic Bead Profile & Cold Lap",
-                    "Confidence": f"{min(round((thickness_cov * 120), 1), 96.0)}%",
-                    "Max Dimension (mm)": round((std_half_width * 2 * mm_per_pixel), 2),
+                    "Defect": "Poor Workmanship / Chaotic Bead Profile & Cold Lap",
+                    "Confidence": f"{min(round(thickness_cov * 100, 1), 95.0)}%",
+                    "Max Dimension (mm)": fluctuation_mm,
                     "Verdict": "REJECT (AWS D1.1 - Severe Bead Width Inconsistency & Lumpiness)"
                 })
 
-        # 3. Slag Pockets & Internal Cavities
-        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (9, 9))
+        # 2. Macro Slag Pockets & Internal Cavities
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (11, 11))
         blackhat = cv2.morphologyEx(roi_gray, cv2.MORPH_BLACKHAT, kernel)
-        _, dark_thresh = cv2.threshold(blackhat, int(45 / sensitivity), 255, cv2.THRESH_BINARY)
+        _, dark_thresh = cv2.threshold(blackhat, int(55 / sensitivity), 255, cv2.THRESH_BINARY)
         dark_contours, _ = cv2.findContours(dark_thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
-        severe_pits = 0
+        macro_pits = []
         for dc in dark_contours:
-            if 10 < cv2.contourArea(dc) < (roi_gray.size * 0.03):
-                severe_pits += 1
+            area = cv2.contourArea(dc)
+            if area > 20:
+                _, _, pw, ph = cv2.boundingRect(dc)
+                pit_size_mm = round(max(pw, ph) * mm_per_pixel, 2)
+                # Ignore micro-textures under 1.6 mm
+                if pit_size_mm >= self.min_defect_size_mm:
+                    macro_pits.append(pit_size_mm)
 
-        if severe_pits >= 4:
+        if len(macro_pits) >= 3 or (len(macro_pits) > 0 and max(macro_pits) > 2.8):
+            max_pit = max(macro_pits)
             findings.append({
-                "Defect": "Slag Inclusions / Surface Cavities",
-                "Confidence": f"{min(75 + severe_pits * 4, 95)}%",
-                "Max Dimension (mm)": round(severe_pits * 0.5 * mm_per_pixel, 2),
-                "Verdict": "REJECT (Uncleaned Slag / Lack of Interpass Fusion)"
+                "Defect": "Slag Inclusions / Severe Surface Cavities",
+                "Confidence": f"{min(80 + len(macro_pits) * 5, 96)}%",
+                "Max Dimension (mm)": max_pit,
+                "Verdict": "REJECT (AWS D1.1 - Uncleaned Slag / Lack of Fusion Voids)"
             })
 
         return findings
@@ -120,11 +109,11 @@ class WeldDefectDetector:
         annotated_img = image_np.copy()
         raw_gray = cv2.cvtColor(image_np, cv2.COLOR_RGB2GRAY)
 
-        # 1. Find the weld seam contour and bounding box
+        # 1. Seam localization
         main_contour, bbox = self.isolate_weld_seam_contour(raw_gray)
         x, y, bw, bh = bbox
 
-        # 2. Evaluate thickness consistency and texture coherence
+        # 2. Evaluate structural quality
         findings = self.evaluate_workmanship_quality(raw_gray, main_contour, bbox, mm_per_pixel, sensitivity)
         overall_status = "PASS"
 
@@ -139,7 +128,6 @@ class WeldDefectDetector:
             cv2.putText(annotated_img, "PASS: Uniform Weld Bead (AWS D1.1 Compliant)", 
                         (x, max(y - 8, 18)), cv2.FONT_HERSHEY_SIMPLEX, 0.48, (0, 255, 0), 2)
 
-        # Format table data
         clean_table_findings = []
         for f in findings:
             clean_table_findings.append({
