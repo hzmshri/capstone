@@ -21,7 +21,7 @@ st.markdown("""
 
     /* Global Body & Steel Truss Blueprint Background */
     .stApp {
-        background-color: #1E1D1A;
+        background-color: #F6F4EE;
         background-image: 
             /* Steel Structural Truss Grid Vector Pattern */
             radial-gradient(#D6D1C4 0.75px, transparent 0.75px),
