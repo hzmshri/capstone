@@ -5,112 +5,126 @@ class WeldDefectDetector:
     def __init__(self, model_path="yolov8n.pt"):
         self.max_isolated_pore_dia_mm = 2.0
 
-    def compute_ripple_regularity(self, roi_gray: np.ndarray) -> float:
+    def find_weld_bead(self, gray: np.ndarray):
         """
-        Measures spatial periodicity using 1D autocorrelation / FFT along the bead.
-        High regularity (> 0.35) = Clean TIG/MIG weave.
-        Low regularity (< 0.15) with high entropy = Chaotic poor workmanship.
+        Locates the primary weld bead by detecting high local contrast and gradient energy.
         """
-        if roi_gray is None or roi_gray.size < 400:
-            return 0.5
-
-        # Normalize lighting
-        norm_roi = cv2.normalize(roi_gray, None, 0, 255, cv2.NORM_MINMAX)
-        
-        # 1D projection of intensity along the primary texture direction
-        proj_x = np.mean(norm_roi, axis=0)
-        proj_y = np.mean(norm_roi, axis=1)
-
-        # Select axis with strongest alternating pattern
-        proj = proj_x if np.var(proj_x) > np.var(proj_y) else proj_y
-        proj = proj - np.mean(proj)
-
-        # Autocorrelation to check for periodic wave patterns
-        if len(proj) < 10 or np.sum(proj ** 2) == 0:
-            return 0.5
-            
-        autocorr = np.correlate(proj, proj, mode='full')
-        autocorr = autocorr[len(autocorr)//2:]
-        autocorr = autocorr / (autocorr[0] + 1e-6)
-
-        # Find secondary peaks indicating steady weaver motion
-        peaks = [autocorr[i] for i in range(1, len(autocorr)-1) 
-                 if autocorr[i] > autocorr[i-1] and autocorr[i] > autocorr[i+1]]
-        
-        if peaks:
-            return float(max(peaks))
-        return 0.1
-
-    def detect_macro_irregularities(self, gray: np.ndarray, mm_per_pixel: float, sensitivity: float):
-        """
-        Identifies severe workmanship failures:
-        - Severe globular lumps (cold lap / uncontrolled puddle)
-        - Extreme width constriction (underfill / lack of fusion)
-        - Large slag inclusions & cavity clusters
-        """
-        findings = []
         h, w = gray.shape
 
-        # Multi-scale morphology to isolate abnormal blobs rather than smooth ripples
-        kernel_lump = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (19, 19))
-        tophat = cv2.morphologyEx(gray, cv2.MORPH_TOPHAT, kernel_lump)
-        blackhat = cv2.morphologyEx(gray, cv2.MORPH_BLACKHAT, kernel_lump)
+        # 1. Multi-scale gradient filter to find the weld seam
+        grad_x = cv2.Sobel(gray, cv2.CV_32F, 1, 0, ksize=3)
+        grad_y = cv2.Sobel(gray, cv2.CV_32F, 0, 1, ksize=3)
+        mag = cv2.magnitude(grad_x, grad_y)
+        mag = cv2.normalize(mag, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
 
-        # Detect massive dark cavities / slag pockets
-        thresh_cavity = int(55 / sensitivity)
-        _, dark_mask = cv2.threshold(blackhat, thresh_cavity, 255, cv2.THRESH_BINARY)
-        cavity_contours, _ = cv2.findContours(dark_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        # 2. Blur and threshold texture energy
+        blurred = cv2.GaussianBlur(mag, (15, 15), 0)
+        _, thresh = cv2.threshold(blurred, 30, 255, cv2.THRESH_BINARY)
+        
+        # Morphological closing to join ripples/lumps into a single seam
+        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (15, 15))
+        closed = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel)
 
-        severe_cavities = []
-        for c in cavity_contours:
-            area = cv2.contourArea(c)
-            if area > (h * w * 0.004):  # Significant localized hole/slag pocket
-                x, y, cw, ch = cv2.boundingRect(c)
-                dim_mm = round(max(cw, ch) * mm_per_pixel, 2)
-                if dim_mm > 3.0:
-                    severe_cavities.append((x, y, cw, ch, dim_mm))
+        contours, _ = cv2.findContours(closed, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        if not contours:
+            return None, (0, 0, w, h), None
 
-        if severe_cavities:
-            max_cavity = max([c[4] for c in severe_cavities])
+        # Filter out background noise, keep prominent textured candidate
+        valid_contours = [c for c in contours if cv2.contourArea(c) > (h * w * 0.008)]
+        if not valid_contours:
+            main_contour = max(contours, key=cv2.contourArea)
+        else:
+            # Sort by aspect ratio and area (welds are elongated)
+            main_contour = max(valid_contours, key=lambda c: cv2.contourArea(c))
+
+        x, y, bw, bh = cv2.boundingRect(main_contour)
+        
+        # Add slight margin
+        pad = 8
+        x1, y1 = max(0, x - pad), max(0, y - pad)
+        x2, y2 = min(w, x + bw + pad), min(h, y + bh + pad)
+
+        return gray[y1:y2, x1:x2], (x1, y1, x2 - x1, y2 - y1), main_contour
+
+    def evaluate_seam_geometry(self, seam_roi: np.ndarray, mm_per_pixel: float, sensitivity: float):
+        """
+        Extracts structural geometric indicators:
+        - Width Coefficient of Variation (CoV = std / mean) along the travel axis
+        - Bead Edge Jaggedness (Perimeter-to-Convex-Hull ratio)
+        - Internal Slag/Cavity clustering
+        """
+        findings = []
+        if seam_roi is None or seam_roi.size < 400:
+            return findings
+
+        h, w = seam_roi.shape
+        is_vertical = h >= w
+
+        # 1. Segment the bead mask inside the ROI
+        _, otsu = cv2.threshold(seam_roi, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
+        bead_mask = cv2.morphologyEx(otsu, cv2.MORPH_OPEN, kernel)
+
+        # 2. Slice-by-Slice Bead Width Consistency
+        slice_widths = []
+        if is_vertical:
+            step = max(int(h / 30), 1)
+            for row in range(0, h, step):
+                row_pixels = np.count_nonzero(bead_mask[row, :])
+                if row_pixels > 0:
+                    slice_widths.append(row_pixels)
+        else:
+            step = max(int(w / 30), 1)
+            for col in range(0, w, step):
+                col_pixels = np.count_nonzero(bead_mask[:, col])
+                if col_pixels > 0:
+                    slice_widths.append(col_pixels)
+
+        # 3. Calculate Variance & Quality Metrics
+        if len(slice_widths) >= 6:
+            mean_w = np.mean(slice_widths)
+            std_w = np.std(slice_widths)
+            cov = (std_w / mean_w) if mean_w > 0 else 0
+
+            # Measure contour edge roughness
+            contours, _ = cv2.findContours(bead_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            roughness_ratio = 1.0
+            if contours:
+                c = max(contours, key=cv2.contourArea)
+                perimeter = cv2.arcLength(c, True)
+                hull = cv2.convexHull(c)
+                hull_perimeter = cv2.arcLength(hull, True)
+                if hull_perimeter > 0:
+                    roughness_ratio = perimeter / hull_perimeter
+
+            # Failure Condition: Inconsistent bead width (lumps/chokes) or erratic toe boundary
+            cov_limit = 0.30 / sensitivity
+            roughness_limit = 1.45 / sensitivity
+
+            if cov > cov_limit or roughness_ratio > roughness_limit:
+                findings.append({
+                    "Defect": "Poor Workmanship / Chaotic Bead Width & Toe Profile",
+                    "Confidence": f"{min(round((cov + roughness_ratio) * 48, 1), 97.0)}%",
+                    "Max Dimension (mm)": round(std_w * mm_per_pixel * 2, 2),
+                    "Verdict": "REJECT (AWS D1.1 - Severe Bead Width Inconsistency / Cold Lap)"
+                })
+
+        # 4. Slag Pockets / Severe Surface Voids
+        blackhat = cv2.morphologyEx(seam_roi, cv2.MORPH_BLACKHAT, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (9, 9)))
+        _, dark_thresh = cv2.threshold(blackhat, int(45 / sensitivity), 255, cv2.THRESH_BINARY)
+        dark_contours, _ = cv2.findContours(dark_thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        
+        deep_pits = 0
+        for dc in dark_contours:
+            if 12 < cv2.contourArea(dc) < (h * w * 0.05):
+                deep_pits += 1
+
+        if deep_pits >= 4:
             findings.append({
-                "Defect": "Slag Pocket / Severe Cavity",
-                "Confidence": "92.0%",
-                "Max Dimension (mm)": max_cavity,
-                "Verdict": "REJECT (AWS D1.1 Non-conforming void)",
-                "BBoxes": [(c[0], c[1], c[2], c[3]) for c in severe_cavities]
-            })
-
-        # Detect chaotic irregular lumps (asymmetrical puddle overflow)
-        thresh_lump = int(50 / sensitivity)
-        _, bright_mask = cv2.threshold(tophat, thresh_lump, 255, cv2.THRESH_BINARY)
-        lump_contours, _ = cv2.findContours(bright_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-
-        abnormal_lumps = []
-        for c in lump_contours:
-            area = cv2.contourArea(c)
-            # Filter out linear reflections by checking aspect ratio & convexity
-            if area > (h * w * 0.008):
-                rect = cv2.minAreaRect(c)
-                rw, rh = rect[1]
-                ratio = max(rw, rh) / max(min(rw, rh), 1)
-                # Lumps are bulky/chaotic, not thin specular highlight lines
-                if ratio < 3.2:
-                    x, y, lw, lh = cv2.boundingRect(c)
-                    lump_dim_mm = round(max(lw, lh) * mm_per_pixel, 2)
-                    abnormal_lumps.append((x, y, lw, lh, lump_dim_mm))
-
-        # Check bead regularity
-        regularity_score = self.compute_ripple_regularity(gray)
-
-        # Only trigger poor workmanship if there are bulky lumps AND low periodicity
-        if len(abnormal_lumps) >= 2 and regularity_score < 0.22:
-            max_lump = max([l[4] for l in abnormal_lumps])
-            findings.append({
-                "Defect": "Poor Workmanship / Chaotic Weld Bead Profile",
-                "Confidence": f"{min(80 + len(abnormal_lumps) * 4, 96)}%",
-                "Max Dimension (mm)": max_lump,
-                "Verdict": "REJECT (Uncontrolled Puddle Progression & Lumpiness)",
-                "BBoxes": [(l[0], l[1], l[2], l[3]) for l in abnormal_lumps]
+                "Defect": "Slag Inclusions / Surface Cavities",
+                "Confidence": f"{min(75 + deep_pits * 4, 95)}%",
+                "Max Dimension (mm)": round(deep_pits * 0.6 * mm_per_pixel, 2),
+                "Verdict": "REJECT (Uncleaned Slag / Lack of Interpass Fusion)"
             })
 
         return findings
@@ -120,22 +134,24 @@ class WeldDefectDetector:
         raw_gray = cv2.cvtColor(image_np, cv2.COLOR_RGB2GRAY)
         h, w = raw_gray.shape
 
-        # Extract macro structural defects
-        findings = self.detect_macro_irregularities(raw_gray, mm_per_pixel, sensitivity)
+        # 1. Isolate the primary weld seam
+        seam_roi, bbox, main_contour = self.find_weld_bead(raw_gray)
+        x, y, bw, bh = bbox
+
+        # 2. Evaluate geometric consistency of the isolated seam
+        findings = self.evaluate_seam_geometry(seam_roi, mm_per_pixel, sensitivity)
         overall_status = "PASS"
 
+        # 3. Draw annotations directly around the detected seam
         if findings:
             overall_status = "FAIL"
-            for f in findings:
-                for (bx, by, bw, bh) in f.get("BBoxes", []):
-                    cv2.rectangle(annotated_img, (bx, by), (bx + bw, by + bh), (255, 0, 0), 2)
-                    cv2.putText(annotated_img, f["Defect"], (bx, max(by - 6, 14)),
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 0, 0), 1)
+            cv2.rectangle(annotated_img, (x, y), (x + bw, y + bh), (255, 0, 0), 2)
+            cv2.putText(annotated_img, f"FAIL: {findings[0]['Defect'][:28]}...", 
+                        (x, max(y - 8, 18)), cv2.FONT_HERSHEY_SIMPLEX, 0.48, (255, 0, 0), 2)
         else:
-            # Mark overall joint as verified acceptable
-            cv2.rectangle(annotated_img, (10, 10), (w - 10, h - 10), (0, 255, 0), 2)
+            cv2.rectangle(annotated_img, (x, y), (x + bw, y + bh), (0, 255, 0), 2)
             cv2.putText(annotated_img, "PASS: Uniform Weld Bead (AWS D1.1 Compliant)", 
-                        (20, 35), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+                        (x, max(y - 8, 18)), cv2.FONT_HERSHEY_SIMPLEX, 0.48, (0, 255, 0), 2)
 
         # Clean table output
         clean_table_findings = []
