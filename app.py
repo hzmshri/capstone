@@ -11,7 +11,7 @@ from weld_analyzer import WeldDefectDetector
 
 # Page Configuration
 st.set_page_config(
-    page_title="WeldQC Enterprise | Structural Field Inspection",
+    page_title="Weld Detection | Structural Field Inspection",
     page_icon="🏗️",
     layout="wide",
     initial_sidebar_state="expanded"
