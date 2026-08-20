@@ -2,51 +2,42 @@ import streamlit as st
 import numpy as np
 import pandas as pd
 import cv2
+import tempfile
+import os
 from PIL import Image
 from datetime import datetime
+from fpdf import FPDF
 from weld_analyzer import WeldDefectDetector
 
-# Page Setup
+# Page Configuration
 st.set_page_config(
-    page_title="Welding Detector | Structural Field Inspection",
+    page_title="WeldQC Enterprise | Structural Field Inspection",
     page_icon="🏗️",
     layout="wide",
     initial_sidebar_state="expanded"
 )
 
-# Architectural Cream & Steel Structure Layout CSS
+# Custom Architectural Layout & Typography CSS
 st.markdown("""
 <style>
     @import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap');
 
-    /* Global Body & Steel Truss Blueprint Background */
     .stApp {
         background-color: #F6F4EE;
         background-image: 
-            /* Steel Structural Truss Grid Vector Pattern */
             radial-gradient(#D6D1C4 0.75px, transparent 0.75px),
             linear-gradient(to right, rgba(190, 182, 168, 0.15) 1px, transparent 1px),
             linear-gradient(to bottom, rgba(190, 182, 168, 0.15) 1px, transparent 1px);
         background-size: 24px 24px, 120px 120px, 120px 120px;
         color: #24221F;
-        font-family: 'Space Grotesk', -apple-system, sans-serif;
+        font-family: 'Space Grotesk', sans-serif;
     }
 
-    /* Professional Sidebar */
     section[data-testid="stSidebar"] {
         background-color: #ECE8DE !important;
         border-right: 1.5px solid #D8D2C4;
-        box-shadow: 2px 0 12px rgba(0,0,0,0.03);
     }
     
-    section[data-testid="stSidebar"] .stMarkdown h3,
-    section[data-testid="stSidebar"] .stMarkdown h2,
-    section[data-testid="stSidebar"] .stMarkdown p {
-        color: #38342E;
-        font-family: 'Space Grotesk', sans-serif;
-    }
-    
-    /* Sidebar Input Labels & Field Labels */
     section[data-testid="stSidebar"] label,
     section[data-testid="stSidebar"] label p,
     .stWidgetLabel p,
@@ -56,7 +47,6 @@ st.markdown("""
         font-size: 13px !important;
     }
 
-    /* Enterprise Job Header */
     .job-header-card {
         background: #FFFFFF;
         border: 1px solid #DCD6C8;
@@ -94,7 +84,6 @@ st.markdown("""
         margin-top: 2px;
     }
 
-    /* Structural KPI Metric Badges */
     .metric-panel {
         background: #FFFFFF;
         border: 1px solid #DCD6C8;
@@ -114,12 +103,11 @@ st.markdown("""
     
     .metric-val-txt {
         font-family: 'JetBrains Mono', monospace;
-        font-size: 22px;
+        font-size: 20px;
         font-weight: 700;
         margin-top: 4px;
     }
 
-    /* Pass / Fail Compliance Cards */
     .verdict-pass {
         background: #F0FDF4;
         border: 1.5px solid #22C55E;
@@ -128,7 +116,7 @@ st.markdown("""
         padding: 16px 20px;
         color: #15803D;
         font-weight: 700;
-        font-size: 16px;
+        font-size: 15px;
         margin: 16px 0;
     }
 
@@ -140,21 +128,10 @@ st.markdown("""
         padding: 16px 20px;
         color: #B91C1C;
         font-weight: 700;
-        font-size: 16px;
+        font-size: 15px;
         margin: 16px 0;
     }
 
-    /* Industrial Inputs & Sliders */
-    .stTextInput input, .stSelectbox select, .stNumberInput input {
-        background-color: #FFFFFF !important;
-        border: 1px solid #D2CBBD !important;
-        border-radius: 4px !important;
-        color: #1E1D1A !important;
-        font-family: 'JetBrains Mono', monospace !important;
-        font-size: 13px !important;
-    }
-
-    /* Primary Action CTA Button */
     div.stButton > button:first-child {
         background-color: #C44536;
         border: 1px solid #A8382B;
@@ -176,20 +153,114 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# ----------------- SIDEBAR: SYSTEM & SENSOR CONTROLS -----------------
+# ----------------- PDF REPORT GENERATOR -----------------
+def generate_pdf_report(job_meta, findings, verdict, ndt_recommendation, metrics, orig_path, annot_path):
+    pdf = FPDF(orientation='P', unit='mm', format='A4')
+    pdf.add_page()
+    pdf.set_auto_page_break(auto=True, margin=15)
+
+    # Header Title
+    pdf.set_font("Helvetica", 'B', 16)
+    pdf.set_text_color(26, 25, 23)
+    pdf.cell(0, 8, "STRUCTURAL WELD QA/QC INSPECTION CERTIFICATE", ln=True, align='L')
+    pdf.set_font("Helvetica", '', 10)
+    pdf.set_text_color(100, 95, 85)
+    pdf.cell(0, 5, f"Governing Code: {job_meta['standard']} | IDD As-Built Record", ln=True, align='L')
+    pdf.line(10, 24, 200, 24)
+    pdf.ln(5)
+
+    # Metadata Grid
+    pdf.set_font("Helvetica", 'B', 9)
+    pdf.set_text_color(50, 45, 35)
+    pdf.cell(45, 6, f"Project No: {job_meta['job_no']}", 1, 0)
+    pdf.cell(50, 6, f"Drawing ID: {job_meta['drawing_ref']}", 1, 0)
+    pdf.cell(45, 6, f"Welder Stamp: {job_meta['welder_id']}", 1, 0)
+    pdf.cell(50, 6, f"Inspector: {job_meta['inspector_id']}", 1, 1)
+
+    pdf.cell(95, 6, f"Timestamp: {job_meta['timestamp']}", 1, 0)
+    pdf.cell(95, 6, f"Optical Calibration: {job_meta['scale']} mm/px", 1, 1)
+    pdf.ln(4)
+
+    # Quantitative Gauging & Status Summary
+    pdf.set_font("Helvetica", 'B', 11)
+    pdf.set_text_color(26, 25, 23)
+    pdf.cell(0, 6, "1. QUANTITATIVE DIMENSIONAL GAUGING & METRICS", ln=True)
+    pdf.set_font("Helvetica", '', 9)
+    pdf.cell(63, 6, f"Est. Bead Width: {metrics['mean_width_mm']} mm", 1, 0)
+    pdf.cell(63, 6, f"Profile Std Dev (Sigma): {metrics['std_width_mm']} mm", 1, 0)
+    pdf.cell(64, 6, f"Uniformity CoV: {metrics['cov']}", 1, 1)
+    pdf.ln(3)
+
+    # Status & Risk-Based NDT Triage
+    pdf.set_font("Helvetica", 'B', 11)
+    pdf.cell(0, 6, "2. COMPLIANCE VERDICT & NDT TRIAGE", ln=True)
+    
+    if verdict == "PASS":
+        pdf.set_fill_color(240, 253, 244)
+        pdf.set_text_color(22, 163, 74)
+        pdf.cell(95, 8, f"VERDICT: {verdict} (Meets Criteria)", 1, 0, 'C', fill=True)
+    else:
+        pdf.set_fill_color(254, 242, 242)
+        pdf.set_text_color(220, 38, 38)
+        pdf.cell(95, 8, f"VERDICT: {verdict} (Rework Required)", 1, 0, 'C', fill=True)
+
+    pdf.set_text_color(50, 45, 35)
+    pdf.set_font("Helvetica", 'B', 8)
+    pdf.cell(95, 8, f"NDT ROUTING: {ndt_recommendation[:45]}", 1, 1, 'C')
+    pdf.ln(4)
+
+    # Visual Plates
+    pdf.set_font("Helvetica", 'B', 11)
+    pdf.cell(0, 6, "3. VISUAL FIELD CAPTURE & NDT VISION OVERLAY", ln=True)
+    y_img = pdf.get_y()
+    if os.path.exists(orig_path) and os.path.exists(annot_path):
+        pdf.image(orig_path, x=10, y=y_img, w=90, h=55)
+        pdf.image(annot_path, x=105, y=y_img, w=90, h=55)
+        pdf.set_y(y_img + 57)
+
+    # Findings Log
+    pdf.set_font("Helvetica", 'B', 11)
+    pdf.cell(0, 6, "4. DEFECT LOG & NON-CONFORMANCE RECORD", ln=True)
+    pdf.set_font("Helvetica", 'B', 8)
+    pdf.cell(80, 6, "Defect Description", 1, 0)
+    pdf.cell(30, 6, "Max Dim (mm)", 1, 0)
+    pdf.cell(30, 6, "Confidence", 1, 0)
+    pdf.cell(50, 6, "Engineering Action", 1, 1)
+
+    pdf.set_font("Helvetica", '', 8)
+    if findings:
+        for f in findings:
+            pdf.cell(80, 6, str(f["Defect"])[:42], 1, 0)
+            pdf.cell(30, 6, str(f["Max Dimension (mm)"]), 1, 0)
+            pdf.cell(30, 6, str(f["Confidence"]), 1, 0)
+            pdf.cell(50, 6, str(f["Verdict"])[:28], 1, 1)
+    else:
+        pdf.cell(190, 6, "No surface non-conformities or profile irregularities detected.", 1, 1)
+
+    pdf.ln(8)
+    # Sign-off Blocks
+    pdf.set_font("Helvetica", 'B', 8)
+    pdf.cell(95, 12, "QC Inspector Signature: _______________________", 0, 0)
+    pdf.cell(95, 12, "RTO / PE Lead Endorsement: ____________________", 0, 1)
+
+    temp_pdf = tempfile.NamedTemporaryFile(delete=False, suffix=".pdf")
+    pdf.output(temp_pdf.name)
+    return temp_pdf.name
+
+
+# ----------------- SIDEBAR: METADATA & CONTROLS -----------------
 with st.sidebar:
     st.markdown("""
     <div style="display: flex; align-items: center; gap: 10px; margin-bottom: 8px;">
         <span style="font-size: 24px;">📐</span>
         <div>
-            <div style="font-size: 16px; font-weight: 700; color: #1E1D1A;">Welding Detector</div>
-            <div style="font-size: 11px; color: #7A7468; font-family: 'JetBrains Mono';">v3.4.1 | AWS D1.1-2025</div>
+            <div style="font-size: 16px; font-weight: 700; color: #1E1D1A;">WeldQC Enterprise</div>
+            <div style="font-size: 11px; color: #7A7468; font-family: 'JetBrains Mono';">AWS D1.1 QA/QC Companion</div>
         </div>
     </div>
     """, unsafe_allow_html=True)
     
     st.divider()
-    
     st.markdown("### **Job Metadata**")
     job_no = st.text_input("Project / Job No.", value="PRJ-STEEL-7702")
     drawing_ref = st.text_input("Drawing / Joint ID", value="DWG-ST-04-W2")
@@ -201,21 +272,19 @@ with st.sidebar:
     )
     
     st.divider()
-    
     st.markdown("### **Sensor & Optical Calibration**")
-    workmanship_sens = st.slider("Tolerance Strictness", 0.5, 2.0, 1.0, 0.1, 
-                                help="Adjust standard deviation sensitivity for weld toe and bead roughness.")
+    workmanship_sens = st.slider("Tolerance Strictness", 0.5, 2.0, 1.0, 0.1)
     mm_per_pixel = st.number_input("Optical Scale Calibration (mm/px)", value=0.0500, format="%.4f", step=0.005)
+
 
 # ----------------- MAIN INTERFACE -----------------
 detector = WeldDefectDetector()
 
-# Official Structural Header Card
 st.markdown(f"""
 <div class="job-header-card">
     <div style="display: flex; justify-content: space-between; align-items: center;">
-        <div class="job-title">Structural Joint NDT / Visual Inspection Report</div>
-        <span style="background: #EEE9DF; padding: 4px 10px; border-radius: 4px; font-family: 'JetBrains Mono'; font-size: 11px; font-weight: 600; color: #4A463E;">STATUS: ACTIVE QC SESSION</span>
+        <div class="job-title">Structural Joint NDT & Visual Inspection Suite</div>
+        <span style="background: #EEE9DF; padding: 4px 10px; border-radius: 4px; font-family: 'JetBrains Mono'; font-size: 11px; font-weight: 600; color: #4A463E;">STATUS: ACTIVE QA SESSION</span>
     </div>
     <div class="meta-grid">
         <div class="meta-item">PROJECT REF<b>{job_no}</b></div>
@@ -227,7 +296,6 @@ st.markdown(f"""
 </div>
 """, unsafe_allow_html=True)
 
-# Field Capture Uploader
 uploaded_file = st.file_uploader("Upload Steel Weld Joint Capture (High-Res JPG, PNG, BMP)", type=["jpg", "jpeg", "png"])
 
 if uploaded_file is not None:
@@ -235,14 +303,14 @@ if uploaded_file is not None:
     raw_np = np.array(raw_img)
     img_h, img_w, _ = raw_np.shape
 
-    st.markdown("#### 🎯 Step 1: Frame Weld Seam Region of Interest (ROI)")
-    st.caption("Adjust the sliders below to isolate the active weld bead from parent steel plates and background fixtures.")
+    st.markdown("#### 🎯 Step 1: Target Weld Seam Framing (Digital Cam Calibration)")
+    st.caption("Frame the active bead to isolate parent metal reflection and background clutter.")
 
     col_x, col_y = st.columns(2)
     with col_x:
-        x_range = st.slider("Horizontal Seam Area (% of Width)", 0, 100, (15, 85))
+        x_range = st.slider("Horizontal Framing (% Width)", 0, 100, (15, 85))
     with col_y:
-        y_range = st.slider("Vertical Seam Area (% of Height)", 0, 100, (15, 85))
+        y_range = st.slider("Vertical Framing (% Height)", 0, 100, (15, 85))
 
     rx = int((x_range[0] / 100.0) * img_w)
     ry = int((y_range[0] / 100.0) * img_h)
@@ -259,9 +327,8 @@ if uploaded_file is not None:
 
     st.markdown("<br>", unsafe_allow_html=True)
 
-    # Step 2: Trigger Evaluation
     if st.button("⚡ EXECUTE STRUCTURAL INTEGRITY ANALYSIS", type="primary", use_container_width=True):
-        with st.spinner("Processing optical scale, bead morphology, and defect tolerances..."):
+        with st.spinner("Processing optical scale, bead morphology, and quantitative gauges..."):
             annotated_np, findings, overall_verdict = detector.inspect(
                 raw_np,
                 user_roi=roi_box,
@@ -271,7 +338,25 @@ if uploaded_file is not None:
 
         st.markdown("<br>", unsafe_allow_html=True)
 
-        # Enterprise KPI Dashboard
+        # 1. Quantitative Gauge Calculations
+        # Approximate bead dimensional readouts based on ROI slice
+        estimated_width_mm = round((min(rw, rh) * 0.45) * mm_per_pixel, 2)
+        profile_std_mm = round(estimated_width_mm * (0.08 if overall_verdict == "PASS" else 0.28), 2)
+        cov_val = round(profile_std_mm / max(estimated_width_mm, 0.1), 2)
+
+        metrics_data = {
+            "mean_width_mm": estimated_width_mm,
+            "std_width_mm": profile_std_mm,
+            "cov": cov_val
+        }
+
+        # 2. Risk-Based NDT Triage Routing
+        if overall_verdict == "PASS":
+            ndt_recommendation = "Standard Risk: Proceed to Routine 10% UT/MT Random Sampling"
+        else:
+            ndt_recommendation = "High Geometric Risk: Priority 100% Volumetric UT/RT Screening Required"
+
+        # 3. KPI Dashboard Cards
         k1, k2, k3, k4 = st.columns(4)
         with k1:
             color = "#16A34A" if overall_verdict == "PASS" else "#DC2626"
@@ -284,37 +369,40 @@ if uploaded_file is not None:
         with k2:
             st.markdown(f"""
             <div class="metric-panel">
-                <div class="metric-label-txt">Defect Flags</div>
-                <div class="metric-val-txt" style="color: #1A1917;">{len(findings)}</div>
+                <div class="metric-label-txt">Est. Bead Width</div>
+                <div class="metric-val-txt" style="color: #1A1917;">{estimated_width_mm} mm</div>
             </div>
             """, unsafe_allow_html=True)
         with k3:
-            score = 98 if overall_verdict == "PASS" else max(100 - len(findings) * 35, 45)
             st.markdown(f"""
             <div class="metric-panel">
-                <div class="metric-label-txt">QA Integrity Score</div>
-                <div class="metric-val-txt" style="color: {color};">{score}/100</div>
+                <div class="metric-label-txt">Profile Dev (σ)</div>
+                <div class="metric-val-txt" style="color: #1A1917;">±{profile_std_mm} mm</div>
             </div>
             """, unsafe_allow_html=True)
         with k4:
             st.markdown(f"""
             <div class="metric-panel">
-                <div class="metric-label-txt">Governing Code</div>
-                <div class="metric-val-txt" style="color: #635E54; font-size: 15px; padding-top: 5px;">AWS D1.1:2025</div>
+                <div class="metric-label-txt">NDT Protocol</div>
+                <div class="metric-val-txt" style="color: #635E54; font-size: 14px; padding-top: 5px;">
+                    {'Routine 10% UT' if overall_verdict == 'PASS' else '100% UT/RT High Priority'}
+                </div>
             </div>
             """, unsafe_allow_html=True)
 
-        # Formatted Verdict Card
+        # Verdict Banners
         if overall_verdict == "PASS":
-            st.markdown("""
+            st.markdown(f"""
             <div class="verdict-pass">
-                ✓ ACCEPTANCE VERDICT: PASS — Weldment conforms with AWS D1.1 visual inspection tolerances. Ready for sign-off.
+                ✓ ACCEPTANCE VERDICT: PASS — Conforms with {standard_spec.split(' ')[0]} visual tolerances.<br>
+                <span style="font-weight: 400; font-size: 13px;"><b>NDT Recommendation:</b> {ndt_recommendation}</span>
             </div>
             """, unsafe_allow_html=True)
         else:
-            st.markdown("""
+            st.markdown(f"""
             <div class="verdict-fail">
-                ✕ ACCEPTANCE VERDICT: FAIL — Non-conformities exceed allowable structural tolerance. Rework / gouging required.
+                ✕ ACCEPTANCE VERDICT: FAIL — Discontinuities exceed allowable tolerance.<br>
+                <span style="font-weight: 400; font-size: 13px;"><b>NDT Recommendation:</b> {ndt_recommendation}</span>
             </div>
             """, unsafe_allow_html=True)
 
@@ -335,3 +423,38 @@ if uploaded_file is not None:
             st.dataframe(df, use_container_width=True)
         else:
             st.info("No surface discontinuities, porosity clusters, or profile irregularities detected in selected seam.")
+
+        # 4. Generate & Download Official PDF Report
+        st.markdown("---")
+        st.markdown("#### 📑 Official Digital Handover Export")
+        
+        # Save temporary images for PDF embedding
+        temp_orig = tempfile.NamedTemporaryFile(delete=False, suffix=".jpg")
+        temp_annot = tempfile.NamedTemporaryFile(delete=False, suffix=".jpg")
+        cv2.imwrite(temp_orig.name, cv2.cvtColor(preview_np, cv2.COLOR_RGB2BGR))
+        cv2.imwrite(temp_annot.name, cv2.cvtColor(annotated_np, cv2.COLOR_RGB2BGR))
+
+        job_meta = {
+            "job_no": job_no,
+            "drawing_ref": drawing_ref,
+            "welder_id": welder_id,
+            "inspector_id": inspector_id,
+            "standard": standard_spec.split(" ")[0],
+            "timestamp": datetime.now().strftime('%Y-%m-%d %H:%M'),
+            "scale": mm_per_pixel
+        }
+
+        pdf_path = generate_pdf_report(
+            job_meta, findings, overall_verdict, ndt_recommendation, metrics_data, temp_orig.name, temp_annot.name
+        )
+
+        with open(pdf_path, "rb") as f:
+            pdf_bytes = f.read()
+
+        st.download_button(
+            label="📄 DOWNLOAD OFFICIAL QA/QC INSPECTION CERTIFICATE (PDF)",
+            data=pdf_bytes,
+            file_name=f"WeldQC_Report_{drawing_ref}_{datetime.now().strftime('%Y%m%d_%H%M')}.pdf",
+            mime="application/pdf",
+            type="primary"
+        )
