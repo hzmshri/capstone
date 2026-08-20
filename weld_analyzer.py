@@ -3,7 +3,7 @@ import numpy as np
 
 class WeldDefectDetector:
     def __init__(self, model_path="yolov8n.pt"):
-        self.min_defect_size_mm = 1.5
+        self.min_defect_size_mm = 1.8
 
     def evaluate_isolated_roi(self, seam_roi: np.ndarray, mm_per_pixel: float, sensitivity: float):
         findings = []
@@ -12,67 +12,81 @@ class WeldDefectDetector:
 
         h, w = seam_roi.shape
 
-        # 1. Isolate the high-texture weld strip within the user's framing box
-        # This prevents smooth background steel plates from diluting the metrics
-        grad_x = cv2.Sobel(seam_roi, cv2.CV_32F, 1, 0, ksize=3)
-        grad_y = cv2.Sobel(seam_roi, cv2.CV_32F, 0, 1, ksize=3)
+        # 1. Suppress metal grain with bilateral filtering
+        smoothed = cv2.bilateralFilter(seam_roi, 7, 50, 50)
+
+        # 2. Isolate prominent weld core features
+        grad_x = cv2.Sobel(smoothed, cv2.CV_32F, 1, 0, ksize=3)
+        grad_y = cv2.Sobel(smoothed, cv2.CV_32F, 0, 1, ksize=3)
         mag = cv2.magnitude(grad_x, grad_y)
         
-        # Take the top 35% highest-contrast/textured pixels in the selected zone (the bead itself)
-        mag_thresh = np.percentile(mag, 65)
-        bead_core_pixels = seam_roi[mag > mag_thresh]
-        
-        if len(bead_core_pixels) < 50:
+        mag_thresh = np.percentile(mag, 70)
+        significant_pixels = mag > mag_thresh
+
+        if np.sum(significant_pixels) < 50:
             return findings
 
-        # 2. Workmanship Metric A: Core Surface Lumpiness & Intensity Variance
-        bead_core_std = float(np.std(bead_core_pixels))
-        
-        # 3. Workmanship Metric B: Bead Edge Straightness / Toe Jaggedness
-        # Smooth welds have continuous linear/arc gradients. Bad welds have chaotic directional scatter.
+        # 3. Workmanship Check: Surface Lumpiness & Angle Scatter
+        laplacian = cv2.Laplacian(smoothed, cv2.CV_64F)
+        local_lumpiness = float(np.mean(np.abs(laplacian[significant_pixels])))
+
         angles = np.arctan2(grad_y, grad_x)
-        angles_core = angles[mag > mag_thresh]
-        angle_scatter = float(np.var(angles_core))
+        angle_scatter = float(np.var(angles[significant_pixels]))
 
-        # 4. Workmanship Metric C: Local Profile Height Deviation
-        # Measures sudden lumpy peaks and valleys across the bead
-        laplacian = cv2.Laplacian(seam_roi, cv2.CV_64F)
-        local_lumpiness = float(np.mean(np.abs(laplacian[mag > mag_thresh])))
+        # Periodicity Check along active travel axis
+        proj_x = np.mean(smoothed, axis=0)
+        proj_y = np.mean(smoothed, axis=1)
+        active_proj = proj_x if np.var(proj_x) > np.var(proj_y) else proj_y
+        active_proj = active_proj - np.mean(active_proj)
 
-        # AWS D1.1 Workmanship Rejection Criteria:
-        # A good TIG/MIG weld has controlled surface variance (std < 42, lumpiness < 28, angle scatter < 1.85).
-        # A poor, lumpy manual weld has erratic metal build-up (std > 48, lumpiness > 32, angle scatter > 1.90).
-        lumpiness_limit = 28.0 / sensitivity
-        scatter_limit = 1.85 / sensitivity
+        regularity = 0.0
+        if len(active_proj) > 20 and np.sum(active_proj ** 2) > 0:
+            autocorr = np.correlate(active_proj, active_proj, mode='full')
+            autocorr = autocorr[len(autocorr)//2:]
+            autocorr = autocorr / (autocorr[0] + 1e-6)
+            peaks = [autocorr[i] for i in range(2, min(len(autocorr)-1, 40)) 
+                     if autocorr[i] > autocorr[i-1] and autocorr[i] > autocorr[i+1]]
+            if peaks:
+                regularity = float(max(peaks))
 
-        if (local_lumpiness > lumpiness_limit and angle_scatter > scatter_limit) or (bead_core_std > (50.0 / sensitivity)):
-            est_defect_dim = round(float(np.max(mag) * mm_per_pixel * 0.08), 2)
+        # Reject only if the seam is excessively lumpy, disorganized, and non-periodic
+        lumpiness_limit = 32.0 / sensitivity
+        scatter_limit = 2.05 / sensitivity
+
+        if local_lumpiness > lumpiness_limit and angle_scatter > scatter_limit and regularity < 0.22:
+            fluctuation_mm = round(float(np.max(mag) * mm_per_pixel * 0.08), 2)
             findings.append({
                 "Defect": "Poor Workmanship / Erratic Bead Profile & Cold Lap",
-                "Confidence": f"{min(round(local_lumpiness * 2.6, 1), 96.0)}%",
-                "Max Dimension (mm)": max(est_defect_dim, 2.8),
+                "Confidence": f"{min(round(local_lumpiness * 2.5, 1), 96.0)}%",
+                "Max Dimension (mm)": max(fluctuation_mm, 2.5),
                 "Verdict": "REJECT (AWS D1.1 - Severe Bead Width Inconsistency & Lumpiness)"
             })
 
-        # 5. Macro Slag Pockets / Severe Surface Cavities
-        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (11, 11))
-        blackhat = cv2.morphologyEx(seam_roi, cv2.MORPH_BLACKHAT, kernel)
-        _, dark_thresh = cv2.threshold(blackhat, int(45 / sensitivity), 255, cv2.THRESH_BINARY)
+        # 4. Isolated Slag Inclusions & Cavity Pits
+        # True slag pockets are compact dark voids, NOT continuous linear shadow steps
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (9, 9))
+        blackhat = cv2.morphologyEx(smoothed, cv2.MORPH_BLACKHAT, kernel)
+        _, dark_thresh = cv2.threshold(blackhat, int(55 / sensitivity), 255, cv2.THRESH_BINARY)
         dark_contours, _ = cv2.findContours(dark_thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
         macro_pits = []
         for dc in dark_contours:
             area = cv2.contourArea(dc)
-            if area > 18:
+            if 15 < area < (seam_roi.size * 0.03):
+                # Calculate bounding rect and aspect ratio
                 _, _, pw, ph = cv2.boundingRect(dc)
-                pit_size_mm = round(max(pw, ph) * mm_per_pixel, 2)
-                if pit_size_mm >= self.min_defect_size_mm:
-                    macro_pits.append(pit_size_mm)
+                aspect_ratio = max(pw, ph) / max(min(pw, ph), 1)
 
-        if len(macro_pits) >= 3 or (len(macro_pits) > 0 and max(macro_pits) > 2.6):
+                # Filter out linear shadows (flange steps/seam edges have aspect ratio > 2.8)
+                if aspect_ratio < 2.5:
+                    pit_size_mm = round(max(pw, ph) * mm_per_pixel, 2)
+                    if pit_size_mm >= self.min_defect_size_mm:
+                        macro_pits.append(pit_size_mm)
+
+        if len(macro_pits) >= 3 or (len(macro_pits) > 0 and max(macro_pits) > 3.0):
             max_pit = max(macro_pits)
             findings.append({
-                "Defect": "Slag Inclusions / Severe Surface Cavities",
+                "Defect": "Slag Inclusions / Isolated Surface Cavities",
                 "Confidence": f"{min(80 + len(macro_pits) * 5, 96)}%",
                 "Max Dimension (mm)": max_pit,
                 "Verdict": "REJECT (AWS D1.1 - Uncleaned Slag / Lack of Fusion Voids)"
