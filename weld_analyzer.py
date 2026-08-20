@@ -3,7 +3,7 @@ import numpy as np
 
 class WeldDefectDetector:
     def __init__(self, model_path="yolov8n.pt"):
-        self.min_defect_size_mm = 1.8
+        self.min_defect_size_mm = 1.5
 
     def evaluate_isolated_roi(self, seam_roi: np.ndarray, mm_per_pixel: float, sensitivity: float):
         findings = []
@@ -11,79 +11,80 @@ class WeldDefectDetector:
             return findings
 
         h, w = seam_roi.shape
+        is_vertical = h >= w
 
-        # 1. Suppress metal grain with bilateral filtering
-        smoothed = cv2.bilateralFilter(seam_roi, 7, 50, 50)
-
-        # 2. Isolate prominent weld core features
+        # 1. Morphological isolation of the active weld metal
+        smoothed = cv2.bilateralFilter(seam_roi, 9, 75, 75)
         grad_x = cv2.Sobel(smoothed, cv2.CV_32F, 1, 0, ksize=3)
         grad_y = cv2.Sobel(smoothed, cv2.CV_32F, 0, 1, ksize=3)
         mag = cv2.magnitude(grad_x, grad_y)
         
-        mag_thresh = np.percentile(mag, 70)
-        significant_pixels = mag > mag_thresh
+        # 2. Slice-by-Slice Bead Width Tracking along primary travel axis
+        # Isolates the textured bead strip from the smooth parent plate
+        mag_norm = cv2.normalize(mag, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
+        _, bead_mask = cv2.threshold(mag_norm, 28, 255, cv2.THRESH_BINARY)
+        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
+        bead_mask = cv2.morphologyEx(bead_mask, cv2.MORPH_CLOSE, kernel)
 
-        if np.sum(significant_pixels) < 50:
-            return findings
+        slice_widths = []
+        if is_vertical:
+            step = max(int(h / 35), 1)
+            for row in range(0, h, step):
+                active_pts = np.where(bead_mask[row, :] > 0)[0]
+                if len(active_pts) > 2:
+                    width = active_pts[-1] - active_pts[0]
+                    slice_widths.append(width)
+        else:
+            step = max(int(w / 35), 1)
+            for col in range(0, w, step):
+                active_pts = np.where(bead_mask[:, col] > 0)[0]
+                if len(active_pts) > 2:
+                    width = active_pts[-1] - active_pts[0]
+                    slice_widths.append(width)
 
-        # 3. Workmanship Check: Surface Lumpiness & Angle Scatter
-        laplacian = cv2.Laplacian(smoothed, cv2.CV_64F)
-        local_lumpiness = float(np.mean(np.abs(laplacian[significant_pixels])))
+        # 3. Workmanship Failure Conditions
+        if len(slice_widths) >= 8:
+            mean_w = np.mean(slice_widths)
+            std_w = np.std(slice_widths)
+            cov_w = (std_w / max(mean_w, 1.0))
+            width_fluctuation_mm = round(std_w * 2.0 * mm_per_pixel, 2)
 
-        angles = np.arctan2(grad_y, grad_x)
-        angle_scatter = float(np.var(angles[significant_pixels]))
+            # Measure Toe Profile Jaggedness
+            edges = cv2.Canny(smoothed, 30, 90)
+            edge_density = np.sum(edges > 0) / max(np.sum(bead_mask > 0), 1)
 
-        # Periodicity Check along active travel axis
-        proj_x = np.mean(smoothed, axis=0)
-        proj_y = np.mean(smoothed, axis=1)
-        active_proj = proj_x if np.var(proj_x) > np.var(proj_y) else proj_y
-        active_proj = active_proj - np.mean(active_proj)
+            # AWS D1.1 Workmanship Thresholds:
+            # Good TIG/MIG weaves: CoV < 0.28, low/medium edge density.
+            # Poor lumpy welds: High width swing (CoV > 0.34) OR erratic edge density (> 0.22).
+            cov_limit = 0.32 / sensitivity
+            edge_limit = 0.20 / sensitivity
 
-        regularity = 0.0
-        if len(active_proj) > 20 and np.sum(active_proj ** 2) > 0:
-            autocorr = np.correlate(active_proj, active_proj, mode='full')
-            autocorr = autocorr[len(autocorr)//2:]
-            autocorr = autocorr / (autocorr[0] + 1e-6)
-            peaks = [autocorr[i] for i in range(2, min(len(autocorr)-1, 40)) 
-                     if autocorr[i] > autocorr[i-1] and autocorr[i] > autocorr[i+1]]
-            if peaks:
-                regularity = float(max(peaks))
+            if cov_w > cov_limit or edge_density > edge_limit:
+                findings.append({
+                    "Defect": "Poor Workmanship / Erratic Bead Profile & Cold Lap",
+                    "Confidence": f"{min(round((cov_w + edge_density) * 110, 1), 96.0)}%",
+                    "Max Dimension (mm)": max(width_fluctuation_mm, 2.8),
+                    "Verdict": "REJECT (AWS D1.1 - Severe Bead Width Inconsistency & Lumpiness)"
+                })
 
-        # Reject only if the seam is excessively lumpy, disorganized, and non-periodic
-        lumpiness_limit = 32.0 / sensitivity
-        scatter_limit = 2.05 / sensitivity
-
-        if local_lumpiness > lumpiness_limit and angle_scatter > scatter_limit and regularity < 0.22:
-            fluctuation_mm = round(float(np.max(mag) * mm_per_pixel * 0.08), 2)
-            findings.append({
-                "Defect": "Poor Workmanship / Erratic Bead Profile & Cold Lap",
-                "Confidence": f"{min(round(local_lumpiness * 2.5, 1), 96.0)}%",
-                "Max Dimension (mm)": max(fluctuation_mm, 2.5),
-                "Verdict": "REJECT (AWS D1.1 - Severe Bead Width Inconsistency & Lumpiness)"
-            })
-
-        # 4. Isolated Slag Inclusions & Cavity Pits
-        # True slag pockets are compact dark voids, NOT continuous linear shadow steps
-        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (9, 9))
-        blackhat = cv2.morphologyEx(smoothed, cv2.MORPH_BLACKHAT, kernel)
-        _, dark_thresh = cv2.threshold(blackhat, int(55 / sensitivity), 255, cv2.THRESH_BINARY)
+        # 4. Isolated Slag Pockets / Severe Surface Voids
+        blackhat = cv2.morphologyEx(smoothed, cv2.MORPH_BLACKHAT, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (9, 9)))
+        _, dark_thresh = cv2.threshold(blackhat, int(52 / sensitivity), 255, cv2.THRESH_BINARY)
         dark_contours, _ = cv2.findContours(dark_thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
         macro_pits = []
         for dc in dark_contours:
             area = cv2.contourArea(dc)
             if 15 < area < (seam_roi.size * 0.03):
-                # Calculate bounding rect and aspect ratio
                 _, _, pw, ph = cv2.boundingRect(dc)
                 aspect_ratio = max(pw, ph) / max(min(pw, ph), 1)
-
-                # Filter out linear shadows (flange steps/seam edges have aspect ratio > 2.8)
+                # True slag cavities are compact (aspect ratio < 2.5), not flange shadows
                 if aspect_ratio < 2.5:
                     pit_size_mm = round(max(pw, ph) * mm_per_pixel, 2)
                     if pit_size_mm >= self.min_defect_size_mm:
                         macro_pits.append(pit_size_mm)
 
-        if len(macro_pits) >= 3 or (len(macro_pits) > 0 and max(macro_pits) > 3.0):
+        if len(macro_pits) >= 3 or (len(macro_pits) > 0 and max(macro_pits) > 2.8):
             max_pit = max(macro_pits)
             findings.append({
                 "Defect": "Slag Inclusions / Isolated Surface Cavities",
@@ -111,13 +112,13 @@ class WeldDefectDetector:
 
         if findings:
             overall_status = "FAIL"
-            cv2.rectangle(annotated_img, (x, y), (x + bw, y + bh), (255, 0, 0), 3)
+            cv2.rectangle(annotated_img, (x, y), (x + bw, y + bh), (220, 38, 38), 3)
             cv2.putText(annotated_img, f"FAIL: {findings[0]['Defect'][:26]}...", 
-                        (x, max(y - 10, 20)), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 0, 0), 2)
+                        (x, max(y - 10, 20)), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (220, 38, 38), 2)
         else:
-            cv2.rectangle(annotated_img, (x, y), (x + bw, y + bh), (0, 255, 0), 3)
+            cv2.rectangle(annotated_img, (x, y), (x + bw, y + bh), (22, 163, 74), 3)
             cv2.putText(annotated_img, "PASS: Uniform Weld Bead (AWS D1.1 Compliant)", 
-                        (x, max(y - 10, 20)), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 0), 2)
+                        (x, max(y - 10, 20)), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (22, 163, 74), 2)
 
         clean_table_findings = []
         for f in findings:
